@@ -1,2 +1,2 @@
 /target
-/tests/fixtures/profile.json
+/tests/fixtures/*.json

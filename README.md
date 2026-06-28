@@ -228,22 +228,46 @@ existing code continues to work transparently.
 `captrack-pgo` is a companion CLI in this workspace that closes the
 measure-apply loop:
 
-1. **Measure** — run your benchmark with `telemetry` enabled and call
-   `captrack::dump_capacity_stats("profile.json")` to capture per-call-site
-   statistics.
-2. **Apply** — let the Dylint plugin rewrite your source with data-driven
-   capacity hints:
+1. **Instrument** — auto-wrap every bare collection constructor with
+   `TrackedX::with_capacity_named(...)` for a single profiling pass:
 
    ```text
-   captrack-pgo apply --profile profile.json [--workspace <path>] [--dry-run]
+   captrack-pgo instrument --workspace <path>
    ```
+
+2. **Measure** — run your benchmark with `telemetry` enabled and call
+   `captrack::dump_capacity_stats("profile.json")` to capture per-call-site
+   statistics, then revert the instrumentation:
+
+   ```text
+   captrack-pgo uninstrument --workspace <path>
+   ```
+
+3. **Apply** — let the Dylint plugin rewrite your source with data-driven
+   capacity hints and (optionally) inject a faster hasher:
+
+   ```text
+   captrack-pgo apply --profile profile.json [--workspace <path>] \
+       [--hasher fx|ahash|foldhash|none] [--dry-run]
+   ```
+
+   - Without `--hasher` (or `--hasher none`): only capacity hints are updated
+     (`Vec::new()` → `Vec::with_capacity(N)`, etc.).
+   - With `--hasher fx`: matched `HashMap`/`HashSet` constructors are also
+     upgraded to `HashMap::with_capacity_and_hasher(N, ::fxhash::FxBuildHasher::default())`.
+     Other hasher options: `ahash` (`::ahash::RandomState::new()`) and
+     `foldhash` (`::foldhash::fast::RandomState::default()`).
+   - The chosen hasher crate must already be a dependency of your workspace
+     (captrack-pgo will emit a reminder).
+   - Sites with an explicit local type ascription (`let m: HashMap<K, V> = ...`)
+     have the hasher injection skipped automatically to avoid compile errors.
 
    Internally this runs `cargo dylint --fix` with the `captrack-pgo-lint`
    plugin, which resolves collection constructors at the semantic (HIR) level
    and emits `rustfix` suggestions.  A before/after manifest is written to
-   `target/captrack-pgo/last-lint-apply.json`.
+   `target/captrack-pgo/last-apply.json`.
 
-3. **Undo** — revert the last apply:
+4. **Undo** — revert the last apply or instrument:
 
    ```text
    captrack-pgo undo

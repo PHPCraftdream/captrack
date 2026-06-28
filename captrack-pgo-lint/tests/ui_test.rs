@@ -182,10 +182,99 @@ fn ui() {
     // we still hold the lock.
     unsafe {
         std::env::remove_var("CAPTRACK_PGO_INSTRUMENT");
+        std::env::remove_var("CAPTRACK_PGO_HASHER");
         std::env::set_var("CAPTRACK_PGO_PROFILE", &profile_path);
     }
 
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_dir);
+}
+
+/// Scan `suggest_hasher.rs` for the constructor sites that should have profile
+/// entries (M9 hasher-injection test).
+///
+/// Profile values trigger `Decision::Patch` for all matched sites:
+///
+/// | Site                              | peak | p95 | count | N (next_pow2(p95)) |
+/// |-----------------------------------|------|-----|-------|--------------------|
+/// | `HashMap::<u8, u8>::new()`        |  100 |  60 |    50 | 64                 |
+/// | `HashMap::with_capacity(4)`       |  100 |  80 |    50 | 128                |
+/// | `HashSet::<u8>::new()`            |  100 |  60 |    50 | 64                 |
+/// | `Vec::<u8>::new()`                |  100 |  60 |    50 | 64                 |
+fn find_suggest_hasher_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
+    let targets: &[(&str, usize, usize, usize, u64)] = &[
+        ("HashMap::<u8, u8>::new()", 100, 60, 60, 50),
+        ("HashMap::with_capacity(4)", 100, 80, 80, 50),
+        ("HashSet::<u8>::new()", 100, 60, 60, 50),
+        ("Vec::<u8>::new()", 100, 60, 60, 50),
+    ];
+
+    let mut results = Vec::new();
+
+    for (line_idx, line_str) in source.lines().enumerate() {
+        let line_no = (line_idx + 1) as u32;
+        let trimmed = line_str.trim_start();
+
+        // Skip pure comment lines.
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        // Skip intentionally-unmatched lines.
+        if line_str.contains("// no-match") {
+            continue;
+        }
+
+        for &(pattern, peak, p50, p95, count) in targets {
+            if let Some(byte_offset) = line_str.find(pattern) {
+                let col = byte_offset as u32 + 1;
+                results.push(SiteStats {
+                    key: SiteKey {
+                        file: file.to_path_buf(),
+                        line: line_no,
+                        col,
+                    },
+                    unit: Unit::Elements,
+                    peak,
+                    p50,
+                    p95,
+                    count,
+                });
+                // One match per line is enough.
+                break;
+            }
+        }
+    }
+
+    results
+}
+
+#[test]
+fn suggest_hasher() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_hasher_dir = manifest_dir.join("ui_hasher");
+    let suggest_hasher_rs = ui_hasher_dir.join("suggest_hasher.rs");
+
+    let source =
+        std::fs::read_to_string(&suggest_hasher_rs).expect("suggest_hasher.rs must be readable");
+
+    // Build a profile JSON covering only suggest_hasher.rs sites.
+    let sites = find_suggest_hasher_ctors(&source, &suggest_hasher_rs);
+    let profile_json = serde_json::to_string_pretty(&sites).expect("serialise hasher profile");
+
+    let fixtures_dir = manifest_dir.join("tests").join("fixtures");
+    std::fs::create_dir_all(&fixtures_dir).expect("create fixtures dir");
+    let profile_path = fixtures_dir.join("profile_hasher.json");
+    std::fs::write(&profile_path, &profile_json).expect("write profile_hasher.json");
+
+    // Take the env mutex to prevent other tests from clobbering env vars.
+    let _guard = ENV_MUTEX.lock().unwrap();
+
+    unsafe {
+        std::env::remove_var("CAPTRACK_PGO_INSTRUMENT");
+        std::env::set_var("CAPTRACK_PGO_PROFILE", &profile_path);
+        std::env::set_var("CAPTRACK_PGO_HASHER", "fx");
+    }
+
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_hasher_dir);
 }
 
 #[test]
@@ -204,6 +293,7 @@ fn instrument() {
     // vars at a time.
     unsafe {
         std::env::remove_var("CAPTRACK_PGO_PROFILE");
+        std::env::remove_var("CAPTRACK_PGO_HASHER");
         std::env::set_var("CAPTRACK_PGO_INSTRUMENT", "1");
     }
 

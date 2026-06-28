@@ -6,6 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+### `captrack-pgo` — M9: `--hasher` flag in `apply`
+
+**`captrack-pgo apply` now accepts `--hasher <fx|ahash|foldhash|none>`.**
+
+When set to anything other than `none` (the default), every matched
+`HashMap`/`HashSet` constructor in the target workspace is upgraded to
+`with_capacity_and_hasher(N, <hasher_default_expr>)` in addition to the
+existing capacity rewrite.
+
+| `--hasher` | Replacement expression |
+|---|---|
+| `fx` | `::fxhash::FxBuildHasher::default()` |
+| `ahash` | `::ahash::RandomState::new()` |
+| `foldhash` | `::foldhash::fast::RandomState::default()` |
+| `none` | no hasher change (default) |
+
+**Behaviour details:**
+
+- `HashMap::new()` → `HashMap::with_capacity_and_hasher(N, <expr>)`
+- `HashMap::with_capacity(K)` → `HashMap::with_capacity_and_hasher(N, <expr>)`
+- `HashMap::with_capacity_and_hasher(K, h)` where `h` is one of the three
+  known defaulted hasher expressions → replace both K and h (idempotent).
+- `HashMap::with_capacity_and_hasher(K, h)` where `h` is a custom expression
+  → preserve the user's hasher, replace K only.
+- `Vec`, `VecDeque`, `BTreeMap`, `BTreeSet` — `--hasher` is silently ignored.
+
+**Type-ascription guard:** sites with an explicit `let` binding type annotation
+(`let m: HashMap<K, V> = ...`) have the hasher injection skipped automatically.
+A note is emitted in the suggestion text.  Sites in struct fields or function
+return types are not detected; users may see compile errors if they accept the
+suggestion in those contexts.
+
+**Dependency reminder:** after applying with `--hasher fx`, captrack-pgo prints
+a reminder to add `fxhash` (or the chosen crate) to your `Cargo.toml`.
+
+**Plugin changes (`captrack-pgo-lint`):**
+
+- New `HasherChoice` enum and `read_hasher_choice()` function (reads
+  `CAPTRACK_PGO_HASHER` env var once, cached in `OnceLock`).
+- New `has_local_type_ascription()` HIR helper — walks the parent chain via
+  `tcx.hir_parent_id_iter()` / `tcx.hir_node()` to detect `LetStmt` with
+  `ty: Some(...)`.
+- `emit_with_suggestion` and `build_suggestion` extended to emit the
+  `with_capacity_and_hasher` form when appropriate.
+- New UI test fixture `ui_hasher/suggest_hasher.rs` + `.stderr` covering all
+  four cases (HashMap/new, HashMap/with_capacity+ascription, HashSet/new,
+  Vec/new).
+
+**CLI changes (`captrack-pgo`):**
+
+- `Apply` subcommand gains `--hasher <value>` argument (validated by clap,
+  default `none`).
+- `LintApplyArgs` gains `pub hasher: HasherChoice` field.
+- `run_lint_apply` forwards the choice as `CAPTRACK_PGO_HASHER` env var.
+- `dry_run` output includes `CAPTRACK_PGO_HASHER=<value>` when hasher is set.
+
+---
+
 ### `captrack-pgo` — BREAKING CHANGES (M5: Path-B migration completed)
 
 The syn-based `propose` / `apply` (old) / `auto` subcommands and their

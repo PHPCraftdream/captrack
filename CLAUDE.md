@@ -131,27 +131,51 @@ captrack library).  Its pipeline as of M5 (Path-B migration, 2026-06-28):
 captrack dump (profile.json)
         │
         ▼
-captrack-pgo apply --profile profile.json
-        │  sets CAPTRACK_PGO_PROFILE env var
+captrack-pgo apply --profile profile.json [--hasher fx|ahash|foldhash|none]
+        │  sets CAPTRACK_PGO_PROFILE (and optionally CAPTRACK_PGO_HASHER) env var
         ▼
 cargo dylint --path captrack-pgo-lint --fix
         │  HIR-level semantic detection + rustfix suggestions
+        │  • capacity rewrite: Vec::new() → Vec::with_capacity(N)
+        │  • hasher swap (when CAPTRACK_PGO_HASHER set):
+        │      HashMap::new() → HashMap::with_capacity_and_hasher(N, ::fxhash::FxBuildHasher::default())
+        │      (skipped for sites with explicit let-binding type ascription)
         ▼
 source files rewritten in place
         │
         ▼
-last-lint-apply.json  (before/after snapshot manifest)
+last-apply.json  (before/after snapshot manifest)
         │
         ▼
 captrack-pgo undo  (restores files from manifest)
 ```
 
+### Hasher swap (M9)
+
+When `CAPTRACK_PGO_HASHER=fx|ahash|foldhash` is set, the `CAPTRACK_PGO_CAPACITY`
+lint also upgrades `HashMap`/`HashSet` constructors to the hasher-bearing form.
+The env var is forwarded by `run_lint_apply` from `LintApplyArgs.hasher`
+(`HasherChoice::{None, Fx, AHash, FoldHash}`).
+
+**Type-ascription guard:** before emitting the hasher-bearing suggestion, the
+lint calls `has_local_type_ascription(cx, call_expr)`.  This walks the HIR
+parent chain via `cx.tcx.hir_parent_id_iter(call_expr.hir_id)` and matches on
+`Node::LetStmt(local)` — if `local.ty.is_some()`, the hasher injection is
+suppressed for that site (capacity rewrite still emitted).  Struct fields and
+return types are **not** detected; those may compile-fail if the user accepts
+the suggestion (documented limitation).
+
+**Known default expressions recognized as idempotent:**
+- `::fxhash::FxBuildHasher::default()`
+- `::ahash::RandomState::new()`
+- `::foldhash::fast::RandomState::default()`
+
 ### Module map (captrack-pgo)
 
 | Module | Purpose |
 |---|---|
-| `src/cli.rs` | Three subcommands: `measure` (stub), `apply` (Dylint orchestration), `undo` |
-| `src/lint_apply.rs` | Core of `apply`: pre-flight, snapshot before, run `cargo dylint --fix`, diff and write manifest; also `undo_lint_apply` |
+| `src/cli.rs` | Five subcommands: `measure` (stub), `apply` (Dylint orchestration + `--hasher`), `instrument`, `undo`, `uninstrument` |
+| `src/lint_apply.rs` | Core of `apply`: `LintApplyArgs` (incl. `hasher: HasherChoice`), `HasherChoice` enum, pre-flight, snapshot before, run `cargo dylint --fix` with env vars, diff and write manifest; also `undo_lint_apply` |
 | `src/model.rs` | `SiteKey`, `SiteStats`, `Unit` — used by profile loaders |
 | `src/profile/mod.rs` | `trait Profile { fn sites() -> Vec<SiteStats> }` |
 | `src/profile/captrack.rs` | Parses `captrack::dump_capacity_stats` JSON output |

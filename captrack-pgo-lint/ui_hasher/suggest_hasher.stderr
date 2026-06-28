@@ -1,0 +1,34 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/suggest_hasher.rs:16:14
+   |
+LL |     let _m = HashMap::<u8, u8>::new();
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^ help: use with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default()): `HashMap::<u8, u8>::with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default())`
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=80, count=50 — pre-allocate to 128
+  --> $DIR/suggest_hasher.rs:20:32
+   |
+LL |     let _m2: HashMap<u8, u8> = HashMap::with_capacity(4);
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: use with_capacity(128) (skipping hasher swap — explicit type ascription would prevent inference)
+   |
+LL -     let _m2: HashMap<u8, u8> = HashMap::with_capacity(4);
+LL +     let _m2: HashMap<u8, u8> = HashMap::with_capacity(128);
+   |
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/suggest_hasher.rs:24:14
+   |
+LL |     let _s = HashSet::<u8>::new();
+   |              ^^^^^^^^^^^^^^^^^^^^ help: use with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default()): `HashSet::<u8>::with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default())`
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/suggest_hasher.rs:27:14
+   |
+LL |     let _v = Vec::<u8>::new();
+   |              ^^^^^^^^^^^^^^^^ help: use with_capacity(64): `Vec::<u8>::with_capacity(64)`
+
+warning: 4 warnings emitted
+

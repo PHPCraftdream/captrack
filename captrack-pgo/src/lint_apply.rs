@@ -298,6 +298,37 @@ pub(crate) fn write_manifest(manifest: &LintRunManifest, manifest_path: &Path) -
 // Core command — apply
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Which hasher the user wants injected when `--hasher` is set.
+///
+/// Maps one-to-one with the `CAPTRACK_PGO_HASHER` env var values that the
+/// lint plugin reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HasherChoice {
+    /// No hasher injection — capacity-only rewrite (default).
+    #[default]
+    None,
+    /// `::fxhash::FxBuildHasher`
+    Fx,
+    /// `::ahash::RandomState`
+    AHash,
+    /// `::foldhash::fast::RandomState`
+    FoldHash,
+}
+
+impl HasherChoice {
+    /// The env-var string to pass to `CAPTRACK_PGO_HASHER`.
+    ///
+    /// Returns `None` for `HasherChoice::None` (env var should be removed).
+    pub fn env_value(self) -> Option<&'static str> {
+        match self {
+            HasherChoice::None => None,
+            HasherChoice::Fx => Some("fx"),
+            HasherChoice::AHash => Some("ahash"),
+            HasherChoice::FoldHash => Some("foldhash"),
+        }
+    }
+}
+
 /// Arguments for the `apply` subcommand, already resolved (paths
 /// canonicalized, defaults applied).
 pub struct LintApplyArgs {
@@ -306,6 +337,8 @@ pub struct LintApplyArgs {
     pub workspace_root: PathBuf,
     pub dry_run: bool,
     pub allow_dirty: bool,
+    /// Hasher to inject into HashMap/HashSet constructors.
+    pub hasher: HasherChoice,
 }
 
 /// Run the `apply` subcommand.
@@ -391,14 +424,28 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
     cmd.env("CAPTRACK_PGO_PROFILE", &abs_profile);
     // Ensure the instrument env var is NOT set (belt-and-suspenders).
     cmd.env_remove("CAPTRACK_PGO_INSTRUMENT");
+    // Forward the hasher choice (or remove the env var when none).
+    match args.hasher.env_value() {
+        Some(v) => {
+            cmd.env("CAPTRACK_PGO_HASHER", v);
+        }
+        None => {
+            cmd.env_remove("CAPTRACK_PGO_HASHER");
+        }
+    }
 
     // Inherit stdio so the user sees compilation progress / lint output.
     cmd.stdin(std::process::Stdio::null());
 
     if args.dry_run {
         println!("captrack-pgo: dry-run — would run:");
+        let hasher_env = args
+            .hasher
+            .env_value()
+            .map(|v| format!(" CAPTRACK_PGO_HASHER={v}"))
+            .unwrap_or_default();
         println!(
-            "  CAPTRACK_PGO_PROFILE={} cargo dylint --path {} -- --manifest-path {}",
+            "  CAPTRACK_PGO_PROFILE={}{hasher_env} cargo dylint --path {} -- --manifest-path {}",
             abs_profile.display(),
             args.lint_path.display(),
             workspace_cargo_toml.display()
@@ -465,6 +512,20 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
     );
     println!("  manifest: {}", manifest_path.display());
     println!("  undo with: captrack-pgo undo --manifest {}", manifest_path.display());
+
+    // Emit dependency reminder when a hasher was injected.
+    if let Some(hasher_val) = args.hasher.env_value() {
+        let dep_name = match hasher_val {
+            "fx" => "fxhash",
+            "ahash" => "ahash",
+            "foldhash" => "foldhash",
+            _ => hasher_val,
+        };
+        eprintln!(
+            "captrack-pgo: note: --hasher {hasher_val} was used. \
+             Remember to add `{dep_name}` to your Cargo.toml if not already present."
+        );
+    }
 
     Ok(())
 }

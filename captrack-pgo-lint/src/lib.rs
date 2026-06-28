@@ -8,13 +8,14 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
 use clippy_utils::source::snippet_opt;
 use clippy_utils::sym;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
-use rustc_hir::{Expr, ExprKind, QPath};
+use rustc_hir::{Expr, ExprKind, Node, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyKind;
 use rustc_span::{FileName, Symbol};
@@ -78,6 +79,22 @@ rustc_session::declare_lint! {
     /// Set `CAPTRACK_PGO_PROFILE=/path/to/profile.json` before building.
     /// Without this env var the lint is a no-op.
     ///
+    /// Optionally set `CAPTRACK_PGO_HASHER=fx|ahash|foldhash` to also inject a
+    /// hasher into `HashMap`/`HashSet` constructors.  Supported values:
+    /// - `fx`       → `::fxhash::FxBuildHasher::default()`
+    /// - `ahash`    → `::ahash::RandomState::new()`
+    /// - `foldhash` → `::foldhash::fast::RandomState::default()`
+    ///
+    /// ### Hasher-injection limitations (M9)
+    ///
+    /// When `CAPTRACK_PGO_HASHER` is set, the lint detects explicit type
+    /// ascriptions on `let` bindings (`let m: HashMap<K, V> = ...`) and
+    /// **skips** the hasher injection for those sites (only the capacity is
+    /// updated).  Sites in struct fields, function return types, or `const`/
+    /// `static` items with explicit types are **not** detected and may produce
+    /// compile errors if the suggestion is accepted.  Remember to add the
+    /// chosen hasher crate to your `Cargo.toml`.
+    ///
     /// ### Why is this bad?
     ///
     /// A collection allocated without a capacity hint causes repeated
@@ -124,6 +141,112 @@ pub(crate) fn sym_with_capacity_and_hasher() -> Symbol {
 /// Return true if `name` is one of the constructor method names we track.
 pub(crate) fn is_tracked_method(name: Symbol) -> bool {
     name == sym::new || name == sym::with_capacity || name == sym_with_capacity_and_hasher()
+}
+
+// ── Hasher choice (M9) ───────────────────────────────────────────────────────
+
+/// Which hasher the user wants injected via `--hasher`.
+///
+/// Read from `CAPTRACK_PGO_HASHER` env var once per plugin load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HasherChoice {
+    /// `::fxhash::FxBuildHasher`
+    Fx,
+    /// `::ahash::RandomState`
+    AHash,
+    /// `::foldhash::fast::RandomState`
+    FoldHash,
+}
+
+impl HasherChoice {
+    /// Default-constructor expression for use in `with_capacity_and_hasher(N, <expr>)`.
+    pub(crate) fn default_expr(self) -> &'static str {
+        match self {
+            HasherChoice::Fx => "::fxhash::FxBuildHasher::default()",
+            HasherChoice::AHash => "::ahash::RandomState::new()",
+            HasherChoice::FoldHash => "::foldhash::fast::RandomState::default()",
+        }
+    }
+}
+
+/// Read `CAPTRACK_PGO_HASHER` once and cache the result.
+///
+/// Returns `None` when the env var is unset or set to "none" (default
+/// behaviour — capacity-only rewrite, no hasher change).
+///
+/// Unknown values produce an `eprintln!` warning and fall back to `None`.
+pub(crate) fn read_hasher_choice() -> Option<HasherChoice> {
+    static CHOICE: OnceLock<Option<HasherChoice>> = OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        let val = match std::env::var("CAPTRACK_PGO_HASHER") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return None,
+        };
+        match val.trim().to_ascii_lowercase().as_str() {
+            "none" | "" => None,
+            "fx" => Some(HasherChoice::Fx),
+            "ahash" => Some(HasherChoice::AHash),
+            "foldhash" => Some(HasherChoice::FoldHash),
+            other => {
+                eprintln!(
+                    "captrack-pgo-lint: unknown CAPTRACK_PGO_HASHER value {:?}; \
+                     known values: fx, ahash, foldhash, none — treating as none",
+                    other
+                );
+                None
+            }
+        }
+    })
+}
+
+/// Determine whether the enclosing `let` binding has an explicit type
+/// ascription that resolves to `HashMap` or `HashSet`.
+///
+/// When `true`, changing `HashMap::new()` to
+/// `HashMap::with_capacity_and_hasher(N, H)` would produce a type-mismatch
+/// because the ascription `HashMap<K, V>` defaults `S = RandomState` while
+/// the RHS would be `HashMap<K, V, H>`.  We skip the hasher rewrite in that
+/// case (the capacity rewrite is still emitted).
+///
+/// ## What we detect
+///
+/// Walk up the HIR parent chain looking for the immediately enclosing node.
+/// If that node is a `Local` (let binding) **and** the local has an explicit
+/// type annotation (`.ty.is_some()`), we return `true` → skip.
+///
+/// ## Known false-negative cases
+///
+/// - Struct fields with explicit type: `struct S { m: HashMap<K,V> }` — the
+///   parent is a `Field`, not a `Local`; we do NOT detect this.  The user may
+///   get a compile error if they accept the hasher suggestion in such a context.
+/// - Function return types, `const`/`static` items — similarly not detected.
+///
+/// For M9, only the local-binding case is handled programmatically.
+fn has_local_type_ascription<'tcx>(cx: &LateContext<'tcx>, call_expr: &Expr<'tcx>) -> bool {
+    // Walk up parent nodes. The immediate parent of the call_expr in a
+    // `let x: T = call_expr;` is an `Expr` wrapper (usually the Init expr),
+    // but the HIR parent chain gives us the enclosing node.
+    //
+    // Layout in HIR for `let _m: HashMap<u8,u8> = HashMap::new();`:
+    //   Local { ty: Some(...), init: Some(call_expr), ... }
+    //
+    // The call_expr's parent HirId points directly to the Local node.
+    //
+    // In nightly-2026-04-16, `tcx.hir()` is gone; use `tcx.hir_parent_id_iter`
+    // and `tcx.hir_node(id)` instead.
+    let call_hir_id = call_expr.hir_id;
+    // Take only the first parent (immediate enclosing node).
+    if let Some(parent_id) = cx.tcx.hir_parent_id_iter(call_hir_id).next() {
+        match cx.tcx.hir_node(parent_id) {
+            Node::LetStmt(local) => {
+                // A `let` binding: check if there's an explicit type annotation.
+                local.ty.is_some()
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
 }
 
 impl<'tcx> LateLintPass<'tcx> for CaptrackPgoCapacity {
@@ -238,6 +361,7 @@ fn check_call_site<'tcx>(
                         &cap_expr,
                         span,
                         profile,
+                        read_hasher_choice(),
                     );
                     return;
                 }
@@ -341,7 +465,7 @@ fn emit_warning_only(cx: &LateContext<'_>, span: rustc_span::Span, profile: &Pro
 #[allow(clippy::too_many_arguments)]
 fn emit_with_suggestion<'tcx>(
     cx: &LateContext<'tcx>,
-    _call_expr: &Expr<'tcx>,
+    call_expr: &Expr<'tcx>,
     fn_expr: &Expr<'tcx>,
     ctor: Ctor,
     method_name: Symbol,
@@ -349,6 +473,7 @@ fn emit_with_suggestion<'tcx>(
     cap_expr: &CapExpr,
     span: rustc_span::Span,
     profile: &Profile,
+    hasher: Option<HasherChoice>,
 ) {
     let key = span_to_site_key(cx, span);
     let Some(stats) = profile.get(&key) else {
@@ -406,10 +531,14 @@ fn emit_with_suggestion<'tcx>(
             ..
         } => {
             // Map our local Applicability to rustc_errors::Applicability.
-            let applicability = match rules_applicability {
+            let base_applicability = match rules_applicability {
                 rules::Applicability::MachineApplicable => Applicability::MachineApplicable,
                 rules::Applicability::MaybeIncorrect => Applicability::MaybeIncorrect,
             };
+
+            // Determine whether we should also inject a new hasher.
+            // Only HashMap and HashSet support `with_capacity_and_hasher`.
+            let inject_hasher = hasher.filter(|_| matches!(ctor, Ctor::HashMap | Ctor::HashSet));
 
             let msg = format!(
                 "captrack-pgo: profile shows peak={peak} {unit}, p95={p95}, count={count} \
@@ -421,11 +550,48 @@ fn emit_with_suggestion<'tcx>(
                 to = to,
             );
 
-            // Build the suggestion string.
-            let Some(sugg) = build_suggestion(cx, fn_expr, method_name, args, to) else {
-                // Couldn't get source snippet — fall back to warning only.
-                span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
-                return;
+            // Build the suggestion string (handles both capacity-only and
+            // capacity+hasher paths).
+            let (sugg, applicability, help_label) = if let Some(h) = inject_hasher {
+                // Check for explicit local type ascription that would block
+                // inference of the new hasher type parameter.
+                let ascription_detected = has_local_type_ascription(cx, call_expr);
+                if ascription_detected {
+                    // Skip hasher swap; fall through to capacity-only path.
+                    // Emit a note about the skip in the suggestion label.
+                    let Some(cap_sugg) = build_suggestion(cx, fn_expr, method_name, args, to, None)
+                    else {
+                        span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                        return;
+                    };
+                    let label = format!(
+                        "use with_capacity({to}) (skipping hasher swap — explicit type \
+                             ascription would prevent inference)"
+                    );
+                    (cap_sugg, base_applicability, label)
+                } else {
+                    // Safe to inject hasher.
+                    let sugg_opt = build_suggestion(cx, fn_expr, method_name, args, to, Some(h));
+                    let applicability = match sugg_opt {
+                        None => {
+                            span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                            return;
+                        }
+                        Some(_) => base_applicability,
+                    };
+                    let sugg = sugg_opt.unwrap();
+                    let label = format!("use with_capacity_and_hasher({to}, {})", h.default_expr());
+                    (sugg, applicability, label)
+                }
+            } else {
+                // No hasher injection: capacity-only path (existing M3 behaviour).
+                let Some(cap_sugg) = build_suggestion(cx, fn_expr, method_name, args, to, None)
+                else {
+                    span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                    return;
+                };
+                let label = format!("use with_capacity({to})");
+                (cap_sugg, base_applicability, label)
             };
 
             span_lint_and_sugg(
@@ -433,7 +599,7 @@ fn emit_with_suggestion<'tcx>(
                 CAPTRACK_PGO_CAPACITY,
                 span,
                 msg,
-                format!("use with_capacity({to})"),
+                help_label,
                 sugg,
                 applicability,
             );
@@ -447,6 +613,16 @@ fn emit_with_suggestion<'tcx>(
 /// `Vec::new` or `std::collections::HashMap::with_capacity`), strip the
 /// trailing constructor name, append the new constructor name and arguments.
 ///
+/// When `inject_hasher` is `Some(h)`, the replacement uses
+/// `with_capacity_and_hasher(to, h.default_expr())` regardless of the current
+/// constructor form.  This covers:
+/// - `new()` → `with_capacity_and_hasher(N, <default_expr>)`
+/// - `with_capacity(K)` → `with_capacity_and_hasher(N, <default_expr>)`
+/// - `with_capacity_and_hasher(K, h)` where `h` is one of our known
+///   defaulted expressions → replace both K and h (idempotent).
+/// - `with_capacity_and_hasher(K, h)` where `h` is NOT a known expression
+///   → preserve the user's hasher (replace K only).
+///
 /// Returns `None` if the source snippet is unavailable (e.g. virtual files).
 fn build_suggestion<'tcx>(
     cx: &LateContext<'tcx>,
@@ -454,6 +630,7 @@ fn build_suggestion<'tcx>(
     method_name: Symbol,
     args: &'tcx [Expr<'tcx>],
     to: usize,
+    inject_hasher: Option<HasherChoice>,
 ) -> Option<String> {
     let fn_text = snippet_opt(cx, fn_expr.span)?;
 
@@ -481,21 +658,57 @@ fn build_suggestion<'tcx>(
     }
 
     // Determine the replacement constructor call.
-    match method_name {
-        n if n == sym::new || n == sym::with_capacity => {
-            // `<Prefix>::with_capacity(<to>)`
-            Some(format!("{prefix}::with_capacity({to})"))
-        }
-        n if n == sym_with_capacity_and_hasher() => {
-            // `<Prefix>::with_capacity_and_hasher(<to>, <hasher>)`
-            // The hasher is args[1] — preserve its source text verbatim.
+    if let Some(h) = inject_hasher {
+        // Hasher-injection path: always emit with_capacity_and_hasher.
+        if method_name == sym_with_capacity_and_hasher() {
+            // Current call is already with_capacity_and_hasher(K, existing_hasher).
+            // Check if existing_hasher is one of our known default expressions
+            // (so we can idempotently replace it).
             let hasher_span = args.get(1)?.span;
-            let hasher_text = snippet_opt(cx, hasher_span)?;
+            let existing_hasher_text = snippet_opt(cx, hasher_span)?;
+
+            let known_defaults = [
+                HasherChoice::Fx.default_expr(),
+                HasherChoice::AHash.default_expr(),
+                HasherChoice::FoldHash.default_expr(),
+            ];
+            if known_defaults.contains(&existing_hasher_text.trim()) {
+                // Idempotent replacement: swap to the chosen hasher.
+                Some(format!(
+                    "{prefix}::with_capacity_and_hasher({to}, {})",
+                    h.default_expr()
+                ))
+            } else {
+                // User's custom hasher — preserve it, only update capacity.
+                Some(format!(
+                    "{prefix}::with_capacity_and_hasher({to}, {existing_hasher_text})"
+                ))
+            }
+        } else {
+            // new() or with_capacity(K) → upgrade to with_capacity_and_hasher.
             Some(format!(
-                "{prefix}::with_capacity_and_hasher({to}, {hasher_text})"
+                "{prefix}::with_capacity_and_hasher({to}, {})",
+                h.default_expr()
             ))
         }
-        _ => None,
+    } else {
+        // Capacity-only path (existing M3 behaviour).
+        match method_name {
+            n if n == sym::new || n == sym::with_capacity => {
+                // `<Prefix>::with_capacity(<to>)`
+                Some(format!("{prefix}::with_capacity({to})"))
+            }
+            n if n == sym_with_capacity_and_hasher() => {
+                // `<Prefix>::with_capacity_and_hasher(<to>, <hasher>)`
+                // The hasher is args[1] — preserve its source text verbatim.
+                let hasher_span = args.get(1)?.span;
+                let hasher_text = snippet_opt(cx, hasher_span)?;
+                Some(format!(
+                    "{prefix}::with_capacity_and_hasher({to}, {hasher_text})"
+                ))
+            }
+            _ => None,
+        }
     }
 }
 

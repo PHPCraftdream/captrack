@@ -13,7 +13,7 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::lint_apply;
+use crate::lint_apply::{self, HasherChoice};
 use crate::lint_instrument;
 
 #[derive(Parser, Debug)]
@@ -40,6 +40,13 @@ pub enum Command {
     ///
     /// Requires: `cargo install cargo-dylint dylint-link` and a nightly toolchain
     /// pinned in `captrack-pgo-lint/rust-toolchain.toml`.
+    ///
+    /// When `--hasher` is set to anything other than `none`, every matched
+    /// `HashMap`/`HashSet` constructor is also upgraded to `with_capacity_and_hasher`.
+    /// Note: sites with an explicit local type ascription (`let m: HashMap<K,V> = ...`)
+    /// have the hasher injection skipped automatically to avoid compile errors;
+    /// sites in struct fields or function return types are not detected and may
+    /// need manual correction.  Remember to add the hasher crate to your Cargo.toml.
     Apply {
         /// Path to a captrack profile JSON (required).
         #[arg(long)]
@@ -61,6 +68,16 @@ pub enum Command {
         /// Pass --allow-dirty to cargo dylint (allow dirty git trees).
         #[arg(long)]
         allow_dirty: bool,
+
+        /// Inject a non-default hasher into HashMap/HashSet constructors.
+        ///
+        /// Accepted values: `fx` (FxBuildHasher), `ahash` (ahash::RandomState),
+        /// `foldhash` (foldhash::fast::RandomState), `none` (default — no change).
+        ///
+        /// The chosen hasher crate must be added to the target workspace's
+        /// Cargo.toml manually; captrack-pgo emits a reminder after apply.
+        #[arg(long, value_name = "HASHER", default_value = "none", value_parser = parse_hasher)]
+        hasher: HasherChoice,
     },
 
     /// Auto-instrument every bare std collection constructor with
@@ -128,6 +145,20 @@ pub enum Command {
     },
 }
 
+/// Clap value_parser for `--hasher`.
+fn parse_hasher(s: &str) -> Result<HasherChoice, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "" => Ok(HasherChoice::None),
+        "fx" => Ok(HasherChoice::Fx),
+        "ahash" => Ok(HasherChoice::AHash),
+        "foldhash" => Ok(HasherChoice::FoldHash),
+        other => Err(format!(
+            "unknown hasher {:?}; accepted values: fx, ahash, foldhash, none",
+            other
+        )),
+    }
+}
+
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Measure { bench } => {
@@ -139,8 +170,9 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             workspace,
             dry_run,
             allow_dirty,
+            hasher,
         } => {
-            run_apply(profile, lint_path, workspace, dry_run, allow_dirty)?;
+            run_apply(profile, lint_path, workspace, dry_run, allow_dirty, hasher)?;
         }
         Command::Instrument {
             lint_path,
@@ -166,6 +198,7 @@ fn run_apply(
     workspace: Option<PathBuf>,
     dry_run: bool,
     allow_dirty: bool,
+    hasher: HasherChoice,
 ) -> anyhow::Result<()> {
     use crate::workspace as ws;
 
@@ -190,6 +223,7 @@ fn run_apply(
         workspace_root,
         dry_run,
         allow_dirty,
+        hasher,
     })
 }
 

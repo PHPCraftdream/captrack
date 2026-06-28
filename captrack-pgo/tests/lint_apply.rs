@@ -223,6 +223,120 @@ fn missing_workspace_exits_with_error() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Hasher-choice structural tests — run unconditionally
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `--dry-run` with `--hasher fx` must mention the hasher in the dry-run output.
+///
+/// This is a structural test: it checks that `LintApplyArgs.hasher = HasherChoice::Fx`
+/// correctly propagates to the dry-run printout (which includes the env var).
+/// We don't need to actually run `cargo dylint` — the dry-run path prints the
+/// would-be invocation, including `CAPTRACK_PGO_HASHER=fx`.
+#[test]
+fn hasher_choice_passes_env_var_to_dylint() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--hasher", "fx", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    // The dry-run output must mention the hasher env var.
+    assert!(
+        stdout.contains("CAPTRACK_PGO_HASHER=fx"),
+        "expected 'CAPTRACK_PGO_HASHER=fx' in dry-run stdout; got:\n{stdout}"
+    );
+}
+
+/// `--hasher none` (the default) must NOT mention `CAPTRACK_PGO_HASHER` in the
+/// dry-run output (the env var is removed when hasher=none).
+#[test]
+fn hasher_none_does_not_set_env_var() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--hasher", "none", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    // Must NOT mention CAPTRACK_PGO_HASHER.
+    assert!(
+        !stdout.contains("CAPTRACK_PGO_HASHER"),
+        "expected no CAPTRACK_PGO_HASHER in dry-run stdout when hasher=none; got:\n{stdout}"
+    );
+}
+
+/// `--hasher` with an invalid value must exit non-zero.
+#[test]
+fn invalid_hasher_value_is_rejected_by_clap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let profile_path = root.join("p.json");
+    std::fs::write(&profile_path, r#"{"version":1,"stats":[]}"#).unwrap();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--hasher", "xxhash", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for unknown hasher value"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("xxhash") || stderr.contains("unknown") || stderr.contains("invalid"),
+        "expected error about invalid hasher; got:\n{stderr}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Live tests — require nightly + cargo-dylint; #[ignore] by default.
 //
 // Run with: cargo test --test lint_apply -- --ignored
