@@ -4,6 +4,7 @@
 
 mod apply;
 mod cli;
+mod lint_apply;
 mod model;
 mod plan;
 mod profile;
