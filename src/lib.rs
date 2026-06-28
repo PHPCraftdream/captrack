@@ -353,6 +353,37 @@ macro_rules! tvec {
     }};
 }
 
+// ── tvec_owned! ──────────────────────────────────────────────────────────────
+
+/// Like [`tvec!`], but always returns a bare `Vec<T>` in both feature modes
+/// and records only the **initial** capacity (no Drop-time peak tracking).
+///
+/// Use at call-sites where the requested capacity is already the final size
+/// (e.g. `tvec_owned!("name", input.len())`) and you want a plain `Vec<T>`
+/// at the boundary without `.into_inner()`.
+///
+/// # When to choose
+///
+/// | Macro               | Returns          | Sample recorded    | Boundary        |
+/// |---------------------|------------------|--------------------|-----------------|
+/// | `tvec!(n, c)`       | `TrackedVec<T>`  | final `capacity()` | `.into_inner()` |
+/// | `tvec_owned!(n, c)` | `Vec<T>`         | initial `c`        | none            |
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tvec_owned;
+/// let v: Vec<u32> = tvec_owned!("my/owned", 16);
+/// assert_eq!(v.capacity(), 16);
+/// ```
+#[macro_export]
+macro_rules! tvec_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::vec_owned_with_capacity_named::<_>($cap, $name, file!(), line!(), column!())
+    }};
+}
+
 // ── tvecdeque! ───────────────────────────────────────────────────────────────
 
 /// Create a `VecDeque<T>` (off) or `TrackedVecDeque<T>` (on) with the given
@@ -370,6 +401,32 @@ macro_rules! tvecdeque {
     ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
         $crate::ctor::vecdeque_with_capacity_named::<_>($cap, $name, file!(), line!(), column!())
+    }};
+}
+
+// ── tvecdeque_owned! ─────────────────────────────────────────────────────────
+
+/// Like [`tvecdeque!`], but always returns a bare `VecDeque<T>` in both
+/// feature modes and records only the **initial** capacity.
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tvecdeque_owned;
+/// let d: std::collections::VecDeque<u32> = tvecdeque_owned!("my/owned/deque", 8);
+/// assert_eq!(d.capacity(), 8);
+/// ```
+#[macro_export]
+macro_rules! tvecdeque_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::vecdeque_owned_with_capacity_named::<_>(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     }};
 }
 
@@ -445,6 +502,43 @@ macro_rules! tbytesmut {
     };
 }
 
+// ── tbytesmut_owned! ─────────────────────────────────────────────────────────
+
+/// Like [`tbytesmut!`], but always returns a bare `bytes::BytesMut` in both
+/// feature modes and records only the **initial** capacity.
+///
+/// Requires the `bytes` crate as a direct dependency of your crate.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tbytesmut_owned;
+/// let b: bytes::BytesMut = tbytesmut_owned!("my/owned/buf", 64);
+/// assert!(b.capacity() >= 64);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tbytesmut_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::bytes::BytesMut::with_capacity($cap)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tbytesmut_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::bytes::BytesMut::with_capacity($cap)
+    }};
+}
+
 // ── tfxmap! ──────────────────────────────────────────────────────────────────
 
 /// `std::HashMap` with `CapHasher` — supports per-call override via `;`-arm.
@@ -485,6 +579,45 @@ macro_rules! tfxmap {
     }};
 }
 
+// ── tfxmap_owned! ────────────────────────────────────────────────────────────
+
+/// Like [`tfxmap!`], but always returns a bare `std::collections::HashMap<K,V,S>`
+/// in both feature modes and records only the **initial** capacity.
+///
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tfxmap_owned;
+/// let m: std::collections::HashMap<u32, u32> = tfxmap_owned!("my/owned/fxmap", 16);
+/// assert!(m.capacity() >= 16);
+/// ```
+#[macro_export]
+macro_rules! tfxmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashmap_owned_with_capacity_named::<_, _, $crate::CapHasher>(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashmap_owned_with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
+    }};
+}
+
 // ── tfxset! ──────────────────────────────────────────────────────────────────
 
 /// `std::HashSet` with `CapHasher` — supports per-call override via `;`-arm.
@@ -511,6 +644,45 @@ macro_rules! tfxset {
     ($name:literal, $cap:expr; $hasher:expr) => {{
         let _: &'static str = $name;
         $crate::ctor::hashset_with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
+    }};
+}
+
+// ── tfxset_owned! ────────────────────────────────────────────────────────────
+
+/// Like [`tfxset!`], but always returns a bare `std::collections::HashSet<T,S>`
+/// in both feature modes and records only the **initial** capacity.
+///
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tfxset_owned;
+/// let s: std::collections::HashSet<u32> = tfxset_owned!("my/owned/fxset", 8);
+/// assert!(s.capacity() >= 8);
+/// ```
+#[macro_export]
+macro_rules! tfxset_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashset_owned_with_capacity_named::<_, $crate::CapHasher>(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashset_owned_with_capacity_and_hasher_named(
             $cap,
             $hasher,
             $name,
@@ -583,6 +755,63 @@ macro_rules! tmap {
     };
 }
 
+// ── tmap_owned! ──────────────────────────────────────────────────────────────
+
+/// Like [`tmap!`], but always returns a bare `indexmap::IndexMap<K,V,S>` in
+/// both feature modes and records only the **initial** capacity.
+///
+/// Requires the `indexmap` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tmap_owned;
+/// let m: indexmap::IndexMap<u32, u32> = tmap_owned!("my/owned/imap", 16);
+/// assert!(m.capacity() >= 16);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::indexmap::IndexMap::with_capacity_and_hasher(
+                $cap,
+                <$crate::CapHasher as ::core::default::Default>::default(),
+            )
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::indexmap::IndexMap::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::indexmap::IndexMap::with_capacity_and_hasher(
+            $cap,
+            <$crate::CapHasher as ::core::default::Default>::default(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::indexmap::IndexMap::with_capacity_and_hasher($cap, $hasher)
+    }};
+}
+
 // ── tset! ────────────────────────────────────────────────────────────────────
 
 /// `IndexSet` with `CapHasher` — insertion-ordered.  Supports `;`-arm override.
@@ -640,6 +869,63 @@ macro_rules! tset {
             column!(),
         )
     };
+}
+
+// ── tset_owned! ──────────────────────────────────────────────────────────────
+
+/// Like [`tset!`], but always returns a bare `indexmap::IndexSet<T,S>` in
+/// both feature modes and records only the **initial** capacity.
+///
+/// Requires the `indexmap` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tset_owned;
+/// let s: indexmap::IndexSet<u32> = tset_owned!("my/owned/iset", 8);
+/// assert!(s.capacity() >= 8);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tset_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::indexmap::IndexSet::with_capacity_and_hasher(
+                $cap,
+                <$crate::CapHasher as ::core::default::Default>::default(),
+            )
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::indexmap::IndexSet::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tset_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::indexmap::IndexSet::with_capacity_and_hasher(
+            $cap,
+            <$crate::CapHasher as ::core::default::Default>::default(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::indexmap::IndexSet::with_capacity_and_hasher($cap, $hasher)
+    }};
 }
 
 // ── tdashmap! ────────────────────────────────────────────────────────────────
@@ -701,6 +987,62 @@ macro_rules! tdashmap {
     };
 }
 
+// ── tdashmap_owned! ──────────────────────────────────────────────────────────
+
+/// Like [`tdashmap!`], but always returns a bare `dashmap::DashMap<K,V,S>` in
+/// both feature modes and records only the **initial** capacity.
+///
+/// Requires the `dashmap` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tdashmap_owned;
+/// let d: dashmap::DashMap<u32, u32> = tdashmap_owned!("my/owned/dmap", 16);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tdashmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::dashmap::DashMap::with_capacity_and_hasher(
+                $cap,
+                <$crate::CapHasher as ::core::default::Default>::default(),
+            )
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::dashmap::DashMap::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tdashmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::dashmap::DashMap::with_capacity_and_hasher(
+            $cap,
+            <$crate::CapHasher as ::core::default::Default>::default(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::dashmap::DashMap::with_capacity_and_hasher($cap, $hasher)
+    }};
+}
+
 // ── tsccmap! ─────────────────────────────────────────────────────────────────
 
 /// `scc::HashMap` with `CapHasher` — lock-free concurrent map.  Supports `;`-arm.
@@ -760,6 +1102,62 @@ macro_rules! tsccmap {
     };
 }
 
+// ── tsccmap_owned! ───────────────────────────────────────────────────────────
+
+/// Like [`tsccmap!`], but always returns a bare `scc::HashMap<K,V,S>` in both
+/// feature modes and records only the **initial** capacity.
+///
+/// Requires the `scc` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tsccmap_owned;
+/// let m: scc::HashMap<u32, u32> = tsccmap_owned!("my/owned/sccmap", 16);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tsccmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::scc::HashMap::with_capacity_and_hasher(
+                $cap,
+                <$crate::CapHasher as ::core::default::Default>::default(),
+            )
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::scc::HashMap::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tsccmap_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::scc::HashMap::with_capacity_and_hasher(
+            $cap,
+            <$crate::CapHasher as ::core::default::Default>::default(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::scc::HashMap::with_capacity_and_hasher($cap, $hasher)
+    }};
+}
+
 // ── tsccset! ─────────────────────────────────────────────────────────────────
 
 /// `scc::HashSet` with `CapHasher`.  Supports `;`-arm.
@@ -811,6 +1209,62 @@ macro_rules! tsccset {
     };
 }
 
+// ── tsccset_owned! ───────────────────────────────────────────────────────────
+
+/// Like [`tsccset!`], but always returns a bare `scc::HashSet<T,S>` in both
+/// feature modes and records only the **initial** capacity.
+///
+/// Requires the `scc` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tsccset_owned;
+/// let s: scc::HashSet<u32> = tsccset_owned!("my/owned/sccset", 8);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tsccset_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::scc::HashSet::with_capacity_and_hasher(
+                $cap,
+                <$crate::CapHasher as ::core::default::Default>::default(),
+            )
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::scc::HashSet::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tsccset_owned {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::scc::HashSet::with_capacity_and_hasher(
+            $cap,
+            <$crate::CapHasher as ::core::default::Default>::default(),
+        )
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::registry::record_initial($name, file!(), line!(), column!(), $cap);
+        #[allow(clippy::disallowed_methods)]
+        ::scc::HashSet::with_capacity_and_hasher($cap, $hasher)
+    }};
+}
+
 // ── tscctree! ────────────────────────────────────────────────────────────────
 
 /// `scc::TreeIndex` — sorted lock-free B+ tree.  Cap hint accepted for API
@@ -837,6 +1291,43 @@ macro_rules! tscctree {
         $crate::TrackedSccTreeIndex::new_named($cap, $name, file!(), line!(), column!())
     };
 }
+
+// ---------------------------------------------------------------------------
+// `t*_owned!` siblings — initial-cap-only family
+//
+// 10 macros that always return the **bare** std/third-party collection type in
+// BOTH feature modes.  They record only the initial capacity (one sample at
+// construction), never the Drop-time peak.
+//
+// Covered types:
+//   tvec_owned!       → Vec<T>
+//   tvecdeque_owned!  → VecDeque<T>
+//   tbytesmut_owned!  → bytes::BytesMut
+//   tfxmap_owned!     → std::collections::HashMap<K,V,S>  (CapHasher default + `;`-arm)
+//   tfxset_owned!     → std::collections::HashSet<T,S>    (CapHasher default + `;`-arm)
+//   tmap_owned!       → indexmap::IndexMap<K,V,S>         (CapHasher default + `;`-arm)
+//   tset_owned!       → indexmap::IndexSet<T,S>           (CapHasher default + `;`-arm)
+//   tdashmap_owned!   → dashmap::DashMap<K,V,S>           (CapHasher default + `;`-arm)
+//   tsccmap_owned!    → scc::HashMap<K,V,S>               (CapHasher default + `;`-arm)
+//   tsccset_owned!    → scc::HashSet<T,S>                 (CapHasher default + `;`-arm)
+//
+// Why NOT tbtreemap_owned!, tbtreeset_owned!, tscctree_owned!:
+//   BTreeMap, BTreeSet, and scc::TreeIndex have NO `with_capacity` constructor;
+//   their initial capacity is always 0.  Recording `0` as the only sample would
+//   be misleading noise.  Use the existing `tbtreemap!` / `tbtreeset!` /
+//   `tscctree!` macros — they record len() at Drop time, which is still useful.
+//
+// Semantics comparison:
+//
+// | Macro             | Returns          | Sample recorded    | Boundary        |
+// |-------------------|------------------|--------------------|-----------------|
+// | tvec!(n, c)       | TrackedVec<T>    | final capacity()   | .into_inner()   |
+// | tvec_owned!(n, c) | Vec<T>           | initial c          | none            |
+//
+// The `_owned` variants are ideal when the capacity is known at construction
+// and you want a plain collection at the function boundary without the
+// `.into_inner()` call.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -9,10 +9,13 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 use crate::registry;
+#[allow(unused_imports)]
 use crate::{
-    IntoInner, TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
-    TrackedHashSet, TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet,
-    TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
+    tbytesmut_owned, tdashmap_owned, tfxmap_owned, tfxset_owned, tmap_owned, tsccmap_owned,
+    tsccset_owned, tset_owned, tvec_owned, tvecdeque_owned, IntoInner, TrackedBTreeMap,
+    TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap, TrackedHashSet,
+    TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet, TrackedSccTreeIndex,
+    TrackedVec, TrackedVecDeque,
 };
 
 // Helper: aggregate registry stats by name across all locations.
@@ -656,4 +659,87 @@ fn into_inner_scc_treeindex_records_sample() {
     };
     assert_eq!(len, 3);
     assert!(peak("on/into_inner_scctree") >= 3);
+}
+
+// ── t*_owned! on-feature tests — initial sample recorded ─────────────────────
+
+#[test]
+fn tvec_owned_records_initial_sample() {
+    let before = count("on/owned/vec");
+    let _v: Vec<u32> = tvec_owned!("on/owned/vec", 32);
+    assert_eq!(count("on/owned/vec") - before, 1);
+    assert!(peak("on/owned/vec") >= 32);
+}
+
+#[test]
+fn tvecdeque_owned_records_initial_sample() {
+    let before = count("on/owned/vecdeque");
+    let _d: std::collections::VecDeque<u32> = tvecdeque_owned!("on/owned/vecdeque", 16);
+    assert_eq!(count("on/owned/vecdeque") - before, 1);
+    assert!(peak("on/owned/vecdeque") >= 16);
+}
+
+#[test]
+fn tbytesmut_owned_records_initial_sample() {
+    let before = count("on/owned/bytesmut");
+    let _b = tbytesmut_owned!("on/owned/bytesmut", 64);
+    assert_eq!(count("on/owned/bytesmut") - before, 1);
+    assert!(peak("on/owned/bytesmut") >= 64);
+}
+
+#[test]
+fn tfxmap_owned_records_initial_sample() {
+    let before = count("on/owned/fxmap");
+    let _m: std::collections::HashMap<u32, u32, crate::CapHasher> =
+        tfxmap_owned!("on/owned/fxmap", 32);
+    assert_eq!(count("on/owned/fxmap") - before, 1);
+    assert!(peak("on/owned/fxmap") >= 32);
+}
+
+#[test]
+fn tfxset_owned_records_initial_sample() {
+    let before = count("on/owned/fxset");
+    let _s: std::collections::HashSet<u32, crate::CapHasher> = tfxset_owned!("on/owned/fxset", 16);
+    assert_eq!(count("on/owned/fxset") - before, 1);
+    assert!(peak("on/owned/fxset") >= 16);
+}
+
+#[test]
+fn tmap_owned_records_initial_sample() {
+    let before = count("on/owned/imap");
+    let _m: indexmap::IndexMap<u32, u32, crate::CapHasher> = tmap_owned!("on/owned/imap", 32);
+    assert_eq!(count("on/owned/imap") - before, 1);
+    assert!(peak("on/owned/imap") >= 32);
+}
+
+#[test]
+fn tset_owned_records_initial_sample() {
+    let before = count("on/owned/iset");
+    let _s: indexmap::IndexSet<u32, crate::CapHasher> = tset_owned!("on/owned/iset", 16);
+    assert_eq!(count("on/owned/iset") - before, 1);
+    assert!(peak("on/owned/iset") >= 16);
+}
+
+#[test]
+fn tdashmap_owned_records_initial_sample() {
+    let before = count("on/owned/dashmap");
+    let _d: dashmap::DashMap<u32, u32, crate::CapHasher> = tdashmap_owned!("on/owned/dashmap", 32);
+    assert_eq!(count("on/owned/dashmap") - before, 1);
+    assert!(peak("on/owned/dashmap") >= 32);
+}
+
+#[test]
+fn tsccmap_owned_records_initial_sample() {
+    let before = count("on/owned/sccmap");
+    let _m: scc::HashMap<u32, u32, crate::CapHasher> = tsccmap_owned!("on/owned/sccmap", 32);
+    assert_eq!(count("on/owned/sccmap") - before, 1);
+    assert!(peak("on/owned/sccmap") >= 32);
+}
+
+#[test]
+fn tsccset_owned_records_initial_sample() {
+    let before = count("on/owned/sccset");
+    let _s: scc::HashSet<u32, crate::CapHasher> = tsccset_owned!("on/owned/sccset", 16);
+    assert_eq!(count("on/owned/sccset") - before, 1);
+    assert!(peak("on/owned/sccset") >= 16);
 }

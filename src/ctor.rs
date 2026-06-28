@@ -214,6 +214,200 @@ pub fn hashmap_with_capacity_and_hasher_named<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// tvec_owned family — returns bare Vec<T>, records initial cap only
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn vec_owned_with_capacity_named<T>(
+    cap: usize,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> Vec<T> {
+    #[allow(clippy::disallowed_methods)]
+    Vec::with_capacity(cap)
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn vec_owned_with_capacity_named<T>(
+    cap: usize,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> Vec<T> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_methods)]
+    Vec::with_capacity(cap)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tvecdeque_owned family — returns bare VecDeque<T>, records initial cap only
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn vecdeque_owned_with_capacity_named<T>(
+    cap: usize,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> std::collections::VecDeque<T> {
+    #[allow(clippy::disallowed_methods)]
+    std::collections::VecDeque::with_capacity(cap)
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn vecdeque_owned_with_capacity_named<T>(
+    cap: usize,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> std::collections::VecDeque<T> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_methods)]
+    std::collections::VecDeque::with_capacity(cap)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tfxmap_owned family — returns bare HashMap<K,V,S>, records initial cap only
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashmap_owned_with_capacity_named<K, V, S: std::hash::BuildHasher + Default>(
+    cap: usize,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> std::collections::HashMap<K, V, S> {
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashMap::with_capacity_and_hasher(cap, S::default())
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashmap_owned_with_capacity_named<K, V, S: std::hash::BuildHasher + Default>(
+    cap: usize,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> std::collections::HashMap<K, V, S> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashMap::with_capacity_and_hasher(cap, S::default())
+}
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashmap_owned_with_capacity_and_hasher_named<K, V, S: std::hash::BuildHasher>(
+    cap: usize,
+    hasher: S,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> std::collections::HashMap<K, V, S> {
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashMap::with_capacity_and_hasher(cap, hasher)
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashmap_owned_with_capacity_and_hasher_named<K, V, S: std::hash::BuildHasher>(
+    cap: usize,
+    hasher: S,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> std::collections::HashMap<K, V, S> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashMap::with_capacity_and_hasher(cap, hasher)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tfxset_owned family — returns bare HashSet<T,S>, records initial cap only
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashset_owned_with_capacity_named<T, S: std::hash::BuildHasher + Default>(
+    cap: usize,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> std::collections::HashSet<T, S> {
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashSet::with_capacity_and_hasher(cap, S::default())
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashset_owned_with_capacity_named<T, S: std::hash::BuildHasher + Default>(
+    cap: usize,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> std::collections::HashSet<T, S> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashSet::with_capacity_and_hasher(cap, S::default())
+}
+
+#[cfg(not(feature = "telemetry"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashset_owned_with_capacity_and_hasher_named<T, S: std::hash::BuildHasher>(
+    cap: usize,
+    hasher: S,
+    _name: &'static str,
+    _file: &'static str,
+    _line: u32,
+    _column: u32,
+) -> std::collections::HashSet<T, S> {
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashSet::with_capacity_and_hasher(cap, hasher)
+}
+
+#[cfg(feature = "telemetry")]
+#[doc(hidden)]
+#[inline(always)]
+pub fn hashset_owned_with_capacity_and_hasher_named<T, S: std::hash::BuildHasher>(
+    cap: usize,
+    hasher: S,
+    name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+) -> std::collections::HashSet<T, S> {
+    crate::registry::record_initial(name, file, line, column, cap);
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    std::collections::HashSet::with_capacity_and_hasher(cap, hasher)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // tfxset family  (std::HashSet)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -83,6 +83,17 @@ pub fn record_creation(name: &'static str, file: &'static str, line: u32, column
     }
 }
 
+/// Record both creation AND an initial capacity sample for a call-site in
+/// one call.  Used by `t*_owned!` macros that return bare types — there is
+/// no `Tracked*` wrapper to capture the Drop-time capacity, so the only
+/// sample is the cap requested at construction.
+///
+/// Equivalent to calling `record_creation` followed by `record_sample`.
+pub fn record_initial(name: &'static str, file: &'static str, line: u32, column: u32, cap: usize) {
+    record_creation(name, file, line, column);
+    record_sample(file, line, column, cap);
+}
+
 /// Record a capacity sample for the call-site. Called from every `Drop` impl
 /// and `IntoIterator::into_iter` impl.
 /// Lock-free: scc::Bag::push does not block or return an error.

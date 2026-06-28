@@ -7,8 +7,10 @@
 
 #[allow(unused_imports)]
 use crate::{
-    tbtreemap, tbtreeset, tbytesmut, tdashmap, tfxmap, tfxset, tmap, tsccmap, tsccset, tscctree,
-    tset, tvec, tvecdeque, IntoInner,
+    tbtreemap, tbtreeset, tbytesmut, tbytesmut_owned, tdashmap, tdashmap_owned, tfxmap,
+    tfxmap_owned, tfxset, tfxset_owned, tmap, tmap_owned, tsccmap, tsccmap_owned, tsccset,
+    tsccset_owned, tscctree, tset, tset_owned, tvec, tvec_owned, tvecdeque, tvecdeque_owned,
+    IntoInner,
 };
 
 #[test]
@@ -273,4 +275,74 @@ fn default_hasher_is_random_state() {
     assert_eq!(m.get("key"), Some(&42u32));
     // Also check: CapHasher IS RandomState (type alias test).
     let _: RandomState = <crate::CapHasher as Default>::default();
+}
+
+// ── t*_owned! tests — bare type returned in both feature modes ────────────────
+
+#[test]
+fn tvec_owned_returns_plain_vec() {
+    let v: Vec<u32> = tvec_owned!("test/owned/vec", 8);
+    assert_eq!(v.capacity(), 8);
+}
+
+#[test]
+fn tvecdeque_owned_returns_plain_vecdeque() {
+    let d: std::collections::VecDeque<u32> = tvecdeque_owned!("test/owned/vecdeque", 8);
+    assert_eq!(d.capacity(), 8);
+}
+
+#[test]
+fn tbytesmut_owned_returns_plain_bytesmut() {
+    let b: bytes::BytesMut = tbytesmut_owned!("test/owned/bytesmut", 64);
+    assert!(b.capacity() >= 64);
+}
+
+#[test]
+fn tfxmap_owned_returns_plain_hashmap() {
+    let m: std::collections::HashMap<u32, u32, crate::CapHasher> =
+        tfxmap_owned!("test/owned/fxmap", 16);
+    assert!(m.capacity() >= 16);
+}
+
+#[test]
+fn tfxset_owned_returns_plain_hashset() {
+    let s: std::collections::HashSet<u32, crate::CapHasher> = tfxset_owned!("test/owned/fxset", 8);
+    assert!(s.capacity() >= 8);
+}
+
+#[test]
+fn tmap_owned_returns_plain_indexmap() {
+    let m: indexmap::IndexMap<u32, u32, crate::CapHasher> = tmap_owned!("test/owned/imap", 16);
+    assert_eq!(m.capacity(), 16);
+}
+
+#[test]
+fn tset_owned_returns_plain_indexset() {
+    let s: indexmap::IndexSet<u32, crate::CapHasher> = tset_owned!("test/owned/iset", 8);
+    assert_eq!(s.capacity(), 8);
+}
+
+#[test]
+fn tdashmap_owned_returns_plain_dashmap() {
+    let d: dashmap::DashMap<u32, u32, crate::CapHasher> = tdashmap_owned!("test/owned/dashmap", 16);
+    d.insert(1u32, 2u32);
+    assert_eq!(d.len(), 1);
+}
+
+#[test]
+fn tsccmap_owned_returns_plain_scc_hashmap() {
+    let m: scc::HashMap<u32, u32, crate::CapHasher> = tsccmap_owned!("test/owned/sccmap", 16);
+    let _ = m.insert(1u32, 2u32);
+    #[allow(clippy::disallowed_methods)]
+    let len = m.len();
+    assert_eq!(len, 1);
+}
+
+#[test]
+fn tsccset_owned_returns_plain_scc_hashset() {
+    let s: scc::HashSet<u32, crate::CapHasher> = tsccset_owned!("test/owned/sccset", 8);
+    let _ = s.insert(1u32);
+    #[allow(clippy::disallowed_methods)]
+    let len = s.len();
+    assert_eq!(len, 1);
 }
