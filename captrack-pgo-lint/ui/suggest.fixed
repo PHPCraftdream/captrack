@@ -1,0 +1,26 @@
+// run-rustfix
+// captrack-pgo-lint M3 UI test fixture — rustfix suggestions.
+//
+// Each "MATCH" site has a profile entry generated at test time.
+// "NO-MATCH" sites deliberately have no profile entry.
+
+use std::collections::hash_map::RandomState;
+use std::collections::{BTreeMap, HashMap};
+
+fn main() {
+    // MATCH: Vec::new() → Vec::with_capacity(64)
+    let _v: Vec<u8> = Vec::with_capacity(64);
+
+    // MATCH: Vec::with_capacity(4) → Vec::with_capacity(128)
+    let _v2: Vec<u8> = Vec::with_capacity(128);
+
+    // MATCH: HashMap::with_capacity_and_hasher → preserve hasher arg
+    let _m: HashMap<u8, u8, RandomState> =
+        HashMap::with_capacity_and_hasher(32, RandomState::new());
+
+    // MATCH: BTreeMap::new() → warning only, no fix-it (BTreeMap has no with_capacity)
+    let _b: BTreeMap<u8, u8> = BTreeMap::new();
+
+    // NO-MATCH: no profile entry → silent (no warning, no fix-it)
+    let _u: Vec<u8> = Vec::new(); // no-match
+}

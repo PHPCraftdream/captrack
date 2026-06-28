@@ -1,0 +1,28 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/suggest.rs:12:23
+   |
+LL |     let _v: Vec<u8> = Vec::new();
+   |                       ^^^^^^^^^^ help: use with_capacity(64): `Vec::with_capacity(64)`
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=80, count=50 — pre-allocate to 128
+  --> $DIR/suggest.rs:15:24
+   |
+LL |     let _v2: Vec<u8> = Vec::with_capacity(4);
+   |                        ^^^^^^^^^^^^^^^^^^^^^ help: use with_capacity(128): `Vec::with_capacity(128)`
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=30, count=50 — pre-allocate to 32
+  --> $DIR/suggest.rs:19:9
+   |
+LL |         HashMap::with_capacity_and_hasher(4, RandomState::new());
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use with_capacity(32): `HashMap::with_capacity_and_hasher(32, RandomState::new())`
+
+warning: captrack-pgo: profile shows peak=100 elements, p95=80, count=50 — consider with_capacity
+  --> $DIR/suggest.rs:22:32
+   |
+LL |     let _b: BTreeMap<u8, u8> = BTreeMap::new();
+   |                                ^^^^^^^^^^^^^^^
+
+warning: 4 warnings emitted
+

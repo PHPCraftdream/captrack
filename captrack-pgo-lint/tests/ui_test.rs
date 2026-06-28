@@ -1,17 +1,17 @@
 use std::path::{Path, PathBuf};
 
-/// Generate a minimal profile JSON with two Vec call-sites from `detect.rs`.
-///
-/// The `file` field must exactly match what the compiler reports for the span
-/// — i.e., the absolute path of `detect.rs` as passed to rustc by compiletest.
-///
-/// Line/col offsets are computed by scanning the detect.rs source file to find
-/// the exact byte positions of `Vec::new()` and `Vec::with_capacity`, so the
-/// profile remains correct even if the fixture file is reformatted.
-fn make_profile_json(detect_rs: &Path) -> String {
-    let source = std::fs::read_to_string(detect_rs).expect("detect.rs must be readable");
+/// Generate a combined profile JSON that covers both `detect.rs` and
+/// `suggest.rs` fixture files.  Each fixture's entries are generated
+/// independently and then concatenated into a single slice before
+/// serialisation, so that `dylint_testing::ui_test` can run both files under
+/// the same `CAPTRACK_PGO_PROFILE` env var.
+fn make_profile_json(detect_rs: &Path, suggest_rs: &Path) -> String {
+    let detect_src = std::fs::read_to_string(detect_rs).expect("detect.rs must be readable");
+    let suggest_src = std::fs::read_to_string(suggest_rs).expect("suggest.rs must be readable");
 
-    let sites = find_vec_ctors(&source, detect_rs);
+    let mut sites = find_detect_ctors(&detect_src, detect_rs);
+    sites.extend(find_suggest_ctors(&suggest_src, suggest_rs));
+
     serde_json::to_string_pretty(&sites).expect("serialise profile")
 }
 
@@ -39,36 +39,26 @@ enum Unit {
     Elements,
 }
 
-/// Scan `source` for constructor patterns that the test profile should match
-/// and return `SiteStats` entries.
+/// Scan `detect.rs` for the Vec constructors that the test profile should
+/// match, using the same pattern-matching logic as M2.
 ///
-/// We look for the first occurrence of `Vec::new()` (the one on the "matched"
-/// line 13) and `Vec::with_capacity` (line 31), extracting their 1-based line
-/// and column numbers.
+/// We include `Vec::new()` and `Vec::with_capacity(` (excluding comment-only
+/// lines).
 ///
-/// Column arithmetic: `CharPos` from `lookup_char_pos` is 0-based;
-/// `column!()` is 1-based.  The lint adds 1 (`col.0 as u32 + 1`), so we do
-/// the same here: scan to find byte offset of the pattern start, then + 1.
-fn find_vec_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
-    // Build a list of (line_no, col_1based, pattern) for each Vec constructor
-    // we want to include in the test profile.  We include only the "matched"
-    // occurrences; the other constructors intentionally have no profile entry.
+/// Profile values: peak=1024, p50=64, p95=512, count=100 — as in M2.
+fn find_detect_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
     let targets: &[&str] = &["Vec::new()", "Vec::with_capacity("];
 
     let mut results = Vec::new();
 
     for (line_idx, line_str) in source.lines().enumerate() {
-        let line_no = (line_idx + 1) as u32; // 1-based
+        let line_no = (line_idx + 1) as u32;
+        let trimmed = line_str.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
         for &pattern in targets {
-            // Only match the FIRST occurrence per line (there's at most one).
-            // Also skip lines that are pure comments.
-            let trimmed = line_str.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
             if let Some(byte_offset) = line_str.find(pattern) {
-                // byte_offset is 0-based byte index within the line.
-                // The lint adds 1 to match `column!()` (1-based), so we do too.
                 let col = byte_offset as u32 + 1;
                 results.push(SiteStats {
                     key: SiteKey {
@@ -82,8 +72,72 @@ fn find_vec_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
                     p95: 512,
                     count: 100,
                 });
-                // Don't break — in theory there could be multiple occurrences,
-                // but in our fixture each matched line has exactly one.
+            }
+        }
+    }
+
+    results
+}
+
+/// Scan `suggest.rs` for the constructor sites that should have profile
+/// entries.
+///
+/// Rules:
+/// - Lines containing `// no-match` are excluded (intentionally unmatched).
+/// - Lines that are pure comments (`//` after trimming) are excluded.
+/// - The remaining lines are scanned for the constructor patterns below.
+///
+/// Profile values are chosen so that `propose_cap` returns `Decision::Patch`
+/// for Vec/HashMap sites and the resulting N values match `suggest.fixed`.
+///
+/// | Site                              | peak | p95 | count | N (next_pow2(p95)) |
+/// |-----------------------------------|------|-----|-------|--------------------|
+/// | `Vec::new()`                      |  100 |  60 |    50 | 64                 |
+/// | `Vec::with_capacity(4)`           |  100 |  80 |    50 | 128                |
+/// | `HashMap::with_capacity_and_hasher(4, …)` | 100 | 30 | 50 | 32          |
+/// | `BTreeMap::new()`                 |  100 |  80 |    50 | —  (warn only)     |
+fn find_suggest_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
+    // Define the patterns to look for and their associated profile values.
+    // Each tuple: (pattern_to_search, peak, p50, p95, count).
+    let targets: &[(&str, usize, usize, usize, u64)] = &[
+        ("Vec::new()", 100, 60, 60, 50),
+        ("Vec::with_capacity(4)", 100, 80, 80, 50),
+        ("HashMap::with_capacity_and_hasher(4,", 100, 30, 30, 50),
+        ("BTreeMap::new()", 100, 80, 80, 50),
+    ];
+
+    let mut results = Vec::new();
+
+    for (line_idx, line_str) in source.lines().enumerate() {
+        let line_no = (line_idx + 1) as u32;
+        let trimmed = line_str.trim_start();
+
+        // Skip pure comment lines.
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        // Skip intentionally-unmatched lines.
+        if line_str.contains("// no-match") {
+            continue;
+        }
+
+        for &(pattern, peak, p50, p95, count) in targets {
+            if let Some(byte_offset) = line_str.find(pattern) {
+                let col = byte_offset as u32 + 1;
+                results.push(SiteStats {
+                    key: SiteKey {
+                        file: file.to_path_buf(),
+                        line: line_no,
+                        col,
+                    },
+                    unit: Unit::Elements,
+                    peak,
+                    p50,
+                    p95,
+                    count,
+                });
+                // One match per line is enough.
+                break;
             }
         }
     }
@@ -94,10 +148,12 @@ fn find_vec_ctors(source: &str, file: &Path) -> Vec<SiteStats> {
 #[test]
 fn ui() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let detect_rs = manifest_dir.join("ui").join("detect.rs");
+    let ui_dir = manifest_dir.join("ui");
+    let detect_rs = ui_dir.join("detect.rs");
+    let suggest_rs = ui_dir.join("suggest.rs");
 
-    // Generate the profile JSON with the machine's absolute path to detect.rs.
-    let profile_json = make_profile_json(&detect_rs);
+    // Generate the combined profile JSON with the machine's absolute paths.
+    let profile_json = make_profile_json(&detect_rs, &suggest_rs);
 
     // Write it to tests/fixtures/profile.json (created fresh on every run).
     let fixtures_dir = manifest_dir.join("tests").join("fixtures");
@@ -106,8 +162,7 @@ fn ui() {
     std::fs::write(&profile_path, &profile_json).expect("write profile.json");
 
     // Set the env var so the child compiler process (spawned by compiletest)
-    // inherits it.  The OnceLock in the plugin loader ensures it is read once
-    // per compiler invocation (each compiletest run is a fresh process).
+    // inherits it.
     //
     // Safety: tests run single-threaded here; the env var is set before
     // compiletest spawns any child processes.
@@ -115,5 +170,5 @@ fn ui() {
         std::env::set_var("CAPTRACK_PGO_PROFILE", &profile_path);
     }
 
-    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &manifest_dir.join("ui"));
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_dir);
 }
