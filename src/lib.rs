@@ -90,6 +90,8 @@ pub mod registry;
 
 pub mod dump;
 
+pub mod stats;
+
 #[cfg(feature = "telemetry")]
 mod tracked;
 
@@ -109,6 +111,7 @@ pub mod ctor;
 pub use captrack_macros::declare_collections;
 pub use dump::dump_capacity_stats;
 pub use hasher::CapHasher;
+pub use stats::SampleStats;
 
 #[cfg(feature = "telemetry")]
 pub use tracked::{
