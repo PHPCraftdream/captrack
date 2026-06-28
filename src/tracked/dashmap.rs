@@ -21,27 +21,50 @@ where
     S: BuildHasher + Clone,
 {
     inner: DashMap<K, V, S>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher + Clone + Default> TrackedDashMap<K, V, S> {
     /// Create with the default hasher (`S::default()`).
-    pub fn with_capacity_named(cap: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_named(
+        cap: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: DashMap::with_capacity_and_hasher(cap, S::default()),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher + Clone> TrackedDashMap<K, V, S> {
     /// Create with an explicit hasher instance (per-call override, Axis 2B).
-    pub fn with_capacity_and_hasher_named(cap: usize, hasher: S, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_and_hasher_named(
+        cap: usize,
+        hasher: S,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: DashMap::with_capacity_and_hasher(cap, hasher),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -64,6 +87,6 @@ impl<K: Eq + Hash, V, S: BuildHasher + Clone> Drop for TrackedDashMap<K, V, S> {
         // O(N) ack: telemetry only — not a hot path.
         #[allow(clippy::disallowed_methods)]
         let peak = self.inner.len();
-        registry::record_peak(self.name, peak);
+        registry::record_sample(self.file, self.line, self.column, peak);
     }
 }

@@ -15,19 +15,30 @@ use crate::{
     TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
 };
 
-// Helper: read the registry stats for a given name.
+// Helper: aggregate registry stats by name across all locations.
+// Returns the maximum sample value seen (analogous to the old peak_capacity).
 fn peak(name: &'static str) -> usize {
-    registry::registry()
-        .get(&name)
-        .map(|e| e.peak_capacity.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    let mut m = 0;
+    registry::registry().scan(|_, stats| {
+        if stats.name == name {
+            if let Ok(v) = stats.samples.lock() {
+                if let Some(&max_here) = v.iter().max() {
+                    m = m.max(max_here);
+                }
+            }
+        }
+    });
+    m
 }
 
 fn count(name: &'static str) -> u64 {
-    registry::registry()
-        .get(&name)
-        .map(|e| e.creation_count.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    let mut s = 0;
+    registry::registry().scan(|_, stats| {
+        if stats.name == name {
+            s += stats.creation_count.load(Ordering::Relaxed);
+        }
+    });
+    s
 }
 
 #[test]
@@ -127,25 +138,37 @@ fn dump_writes_valid_json() {
     let stats = v["stats"].as_array().expect("stats must be an array");
     assert!(!stats.is_empty(), "stats array must not be empty");
 
-    // Verify descending sort by peak_capacity.
-    let peaks: Vec<u64> = stats
+    // Verify descending sort by max(samples).
+    let max_samples: Vec<u64> = stats
         .iter()
-        .map(|e| e["peak_capacity"].as_u64().unwrap_or(0))
+        .map(|e| {
+            e["samples"]
+                .as_array()
+                .and_then(|arr| arr.iter().filter_map(|v| v.as_u64()).max())
+                .unwrap_or(0)
+        })
         .collect();
-    let mut sorted = peaks.clone();
+    let mut sorted = max_samples.clone();
     sorted.sort_unstable_by(|a, b| b.cmp(a));
     assert_eq!(
-        peaks, sorted,
-        "stats must be sorted by peak_capacity descending"
+        max_samples, sorted,
+        "stats must be sorted by max(samples) descending"
     );
 
     let our_entry = stats
         .iter()
         .find(|e| e["name"].as_str() == Some("on/dump"))
         .expect("our named entry must appear in the dump");
+    let our_samples = our_entry["samples"]
+        .as_array()
+        .expect("samples must be an array");
     assert!(
-        our_entry["peak_capacity"].as_u64().unwrap_or(0) >= 128,
-        "peak for on/dump must be >= 128"
+        !our_samples.is_empty(),
+        "samples for on/dump must not be empty"
+    );
+    assert!(
+        our_samples.iter().filter_map(|v| v.as_u64()).max().unwrap_or(0) >= 128,
+        "max sample for on/dump must be >= 128"
     );
     assert!(
         our_entry["creation_count"].as_u64().unwrap_or(0) >= 1,
@@ -348,6 +371,27 @@ fn tfxmap_into_iter_records_peak_before_consume() {
         peak("on/fxmap_iter") >= 16,
         "peak must be recorded before inner is consumed by into_iter"
     );
+}
+
+#[test]
+fn into_vec_records_sample_on_conversion() {
+    use crate::IntoVec;
+    let before = count("on/into_vec");
+    {
+        let mut v: TrackedVec<u32> = tvec!("on/into_vec", 64);
+        v.push(1);
+        let raw: Vec<u32> = v.into_vec();
+        // raw is now a bare Vec — Drop runs on it, not on TrackedVec.
+        assert_eq!(raw.len(), 1);
+        assert!(raw.capacity() >= 64);
+    }
+    // Sample should be recorded by From<TrackedVec> for Vec (called via IntoVec).
+    // Without the explicit record_sample in From, peak would be 0.
+    assert!(
+        peak("on/into_vec") >= 64,
+        "into_vec() must record capacity sample before unwrapping inner"
+    );
+    assert_eq!(count("on/into_vec") - before, 1);
 }
 
 #[test]

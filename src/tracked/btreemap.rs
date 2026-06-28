@@ -9,17 +9,30 @@ use crate::registry;
 /// is used as the peak metric (B-tree capacity is not observable).
 pub struct TrackedBTreeMap<K: Ord, V> {
     inner: BTreeMap<K, V>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<K: Ord, V> TrackedBTreeMap<K, V> {
     /// `_cap_hint` is accepted for API uniformity (matches the macro signature)
     /// but is not passed to `BTreeMap` which has no capacity concept.
-    pub fn new_named(_cap_hint: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn new_named(
+        _cap_hint: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: BTreeMap::new(),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -39,8 +52,8 @@ impl<K: Ord, V> std::ops::DerefMut for TrackedBTreeMap<K, V> {
 
 impl<K: Ord, V> Drop for TrackedBTreeMap<K, V> {
     fn drop(&mut self) {
-        // BTreeMap has no `capacity()` — record len as peak metric.
-        registry::record_peak(self.name, self.inner.len());
+        // BTreeMap has no `capacity()` — record len as the sample metric.
+        registry::record_sample(self.file, self.line, self.column, self.inner.len());
     }
 }
 
@@ -49,7 +62,7 @@ impl<K: Ord, V> IntoIterator for TrackedBTreeMap<K, V> {
     type IntoIter = std::collections::btree_map::IntoIter<K, V>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        registry::record_peak(self.name, self.inner.len());
+        registry::record_sample(self.file, self.line, self.column, self.inner.len());
         let inner = std::mem::take(&mut self.inner);
         std::mem::forget(self);
         inner.into_iter()

@@ -1,7 +1,7 @@
 // dump_capacity_stats — always available, no-op in off-feature mode.
 //
 // In on-feature mode: serialises the global registry to a pretty-printed JSON
-// file, sorted by peak_capacity descending so the biggest allocations surface
+// file, sorted by max(samples) descending so the biggest allocations surface
 // first.
 //
 // Intended use: call once at the end of a benchmark main function.
@@ -20,8 +20,11 @@ mod inner {
     #[derive(Serialize)]
     struct Entry {
         name: &'static str,
-        peak_capacity: usize,
+        file: &'static str,
+        line: u32,
+        column: u32,
         creation_count: u64,
+        samples: Vec<usize>,
     }
 
     #[derive(Serialize)]
@@ -30,20 +33,32 @@ mod inner {
         stats: Vec<Entry>,
     }
 
-    fn entry_from(name: &'static str, stats: &CapStats) -> Entry {
+    fn entry_from(
+        (file, line, column): (&'static str, u32, u32),
+        stats: &CapStats,
+    ) -> Entry {
+        let samples = stats
+            .samples
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         Entry {
-            name,
-            peak_capacity: stats.peak_capacity.load(Ordering::Relaxed),
+            name: stats.name,
+            file,
+            line,
+            column,
             creation_count: stats.creation_count.load(Ordering::Relaxed),
+            samples,
         }
     }
 
     pub fn dump_capacity_stats(path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut entries: Vec<Entry> = Vec::new();
-        crate::registry::registry().scan(|name, stats| {
-            entries.push(entry_from(name, stats));
+        crate::registry::registry().scan(|loc, stats| {
+            entries.push(entry_from(*loc, stats));
         });
-        entries.sort_by_key(|e| Reverse(e.peak_capacity));
+        // Sort by max sample descending — entries with no samples sort last (0).
+        entries.sort_by_key(|e| Reverse(e.samples.iter().copied().max().unwrap_or(0)));
 
         let dump = Dump {
             version: 1,
@@ -60,7 +75,7 @@ mod inner {
 }
 
 /// Write accumulated capacity statistics to a JSON file, sorted by
-/// `peak_capacity` descending.
+/// `max(samples)` descending.
 ///
 /// In off-feature mode this is a no-op that returns `Ok(())` immediately so
 /// benchmark code can call it unconditionally without `#[cfg]` guards.

@@ -5,15 +5,28 @@ use crate::registry;
 /// A `BytesMut` wrapper that records creation count and peak capacity.
 pub struct TrackedBytesMut {
     inner: BytesMut,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl TrackedBytesMut {
-    pub fn with_capacity_named(cap: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_named(
+        cap: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: BytesMut::with_capacity(cap),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -33,6 +46,6 @@ impl std::ops::DerefMut for TrackedBytesMut {
 
 impl Drop for TrackedBytesMut {
     fn drop(&mut self) {
-        registry::record_peak(self.name, self.inner.capacity());
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
     }
 }

@@ -1,6 +1,6 @@
 // TrackedHashMap wraps std::HashMap — generic over the build-hasher S.
 // The default `S = crate::CapHasher` is set at the type level so that
-// `tmap!("n", 16)` emits `TrackedHashMap::with_capacity_named(16, "n")`
+// `tmap!("n", 16)` emits `TrackedHashMap::with_capacity_named(16, "n", ...)`
 // and uses `CapHasher` without the caller needing to spell it out.
 
 #![allow(clippy::disallowed_types)]
@@ -16,27 +16,50 @@ use crate::registry;
 /// Use `with_capacity_and_hasher_named` to override the hasher per-call.
 pub struct TrackedHashMap<K, V, S = crate::CapHasher> {
     inner: HashMap<K, V, S>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher + Default> TrackedHashMap<K, V, S> {
     /// Create with the default hasher (`S::default()`).
-    pub fn with_capacity_named(cap: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_named(
+        cap: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: HashMap::with_capacity_and_hasher(cap, S::default()),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher> TrackedHashMap<K, V, S> {
     /// Create with an explicit hasher instance (per-call override, Axis 2B).
-    pub fn with_capacity_and_hasher_named(cap: usize, hasher: S, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_and_hasher_named(
+        cap: usize,
+        hasher: S,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: HashMap::with_capacity_and_hasher(cap, hasher),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -56,7 +79,7 @@ impl<K, V, S> std::ops::DerefMut for TrackedHashMap<K, V, S> {
 
 impl<K, V, S> Drop for TrackedHashMap<K, V, S> {
     fn drop(&mut self) {
-        registry::record_peak(self.name, self.inner.capacity());
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
     }
 }
 
@@ -65,7 +88,7 @@ impl<K: Eq + Hash, V, S: BuildHasher + Default> IntoIterator for TrackedHashMap<
     type IntoIter = std::collections::hash_map::IntoIter<K, V>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        registry::record_peak(self.name, self.inner.capacity());
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
         let inner = std::mem::replace(&mut self.inner, HashMap::with_hasher(S::default()));
         std::mem::forget(self);
         inner.into_iter()

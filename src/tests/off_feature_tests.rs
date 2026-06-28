@@ -167,6 +167,17 @@ fn dump_is_noop_in_off_feature() {
     }
 }
 
+#[test]
+fn into_vec_identity_in_off_feature() {
+    use crate::IntoVec;
+    let mut v = tvec!("test/into_vec", 8);
+    v.push(1u32);
+    v.push(2u32);
+    let raw: Vec<u32> = v.into_vec();
+    assert_eq!(raw.len(), 2);
+    assert!(raw.capacity() >= 8);
+}
+
 /// Verify that CapHasher is RandomState when no hasher feature is active.
 /// This is a type-inference test — the map must accept standard random keys.
 #[cfg(not(any(

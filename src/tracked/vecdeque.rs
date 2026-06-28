@@ -5,15 +5,28 @@ use crate::registry;
 /// A `VecDeque<T>` wrapper that records creation count and peak capacity.
 pub struct TrackedVecDeque<T> {
     inner: VecDeque<T>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<T> TrackedVecDeque<T> {
-    pub fn with_capacity_named(cap: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn with_capacity_named(
+        cap: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: VecDeque::with_capacity(cap),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -33,7 +46,7 @@ impl<T> std::ops::DerefMut for TrackedVecDeque<T> {
 
 impl<T> Drop for TrackedVecDeque<T> {
     fn drop(&mut self) {
-        registry::record_peak(self.name, self.inner.capacity());
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
     }
 }
 
@@ -42,7 +55,7 @@ impl<T> IntoIterator for TrackedVecDeque<T> {
     type IntoIter = std::collections::vec_deque::IntoIter<T>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        registry::record_peak(self.name, self.inner.capacity());
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
         let inner = std::mem::take(&mut self.inner);
         std::mem::forget(self);
         inner.into_iter()

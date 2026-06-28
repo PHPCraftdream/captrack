@@ -8,15 +8,28 @@ use crate::registry;
 /// inner allocation, and peak is measured via `len()` on Drop.
 pub struct TrackedBTreeSet<T: Ord> {
     inner: BTreeSet<T>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<T: Ord> TrackedBTreeSet<T> {
-    pub fn new_named(_cap_hint: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn new_named(
+        _cap_hint: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: BTreeSet::new(),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -36,7 +49,7 @@ impl<T: Ord> std::ops::DerefMut for TrackedBTreeSet<T> {
 
 impl<T: Ord> Drop for TrackedBTreeSet<T> {
     fn drop(&mut self) {
-        registry::record_peak(self.name, self.inner.len());
+        registry::record_sample(self.file, self.line, self.column, self.inner.len());
     }
 }
 
@@ -45,7 +58,7 @@ impl<T: Ord> IntoIterator for TrackedBTreeSet<T> {
     type IntoIter = std::collections::btree_set::IntoIter<T>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        registry::record_peak(self.name, self.inner.len());
+        registry::record_sample(self.file, self.line, self.column, self.inner.len());
         let inner = std::mem::take(&mut self.inner);
         std::mem::forget(self);
         inner.into_iter()

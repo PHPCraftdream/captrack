@@ -9,13 +9,13 @@
 //! feature is enabled, each macro instead returns a `Tracked*` wrapper that
 //! records two counters in a global lock-free registry:
 //!
-//! * `peak_capacity` — maximum capacity observed across all instances of that
-//!   name (updated in `Drop` via `fetch_max`).
+//! * `samples` — raw capacity recorded on each Drop / into_iter (one entry per
+//!   instance; max/mean/p99 are computed by the caller in post-processing).
 //! * `creation_count` — total number of instances created (updated in ctor
 //!   via `fetch_add`).
 //!
 //! Call [`dump_capacity_stats`] at any point (e.g. end of a benchmark) to
-//! write the accumulated stats as pretty-printed JSON.
+//! write the accumulated samples as pretty-printed JSON.
 //!
 //! # Three orthogonal axes
 //!
@@ -106,6 +106,66 @@ pub use tracked::{
 };
 
 // ---------------------------------------------------------------------------
+// Cross-feature boundary bridges
+//
+// `tvec!(...)` returns `Vec<T>` in off-feature mode and `TrackedVec<T>` in
+// on-feature mode.  When a user function's return type is `Vec<T>` (not generic
+// over the feature flag), the same source code must compile in BOTH modes.
+//
+// Naive `.into()` at the call-site works (via the `From<TrackedVec<T>> for
+// Vec<T>` impl in `tracked/vec.rs`) but trips `clippy::useless_conversion` in
+// off-feature mode (`Vec<T> -> Vec<T>` is the identity).  Sprinkling
+// `#[allow]` across every boundary is ugly.
+//
+// `IntoVec::into_vec()` solves this: it's the identity move in off-feature
+// (no clippy warning, no overhead) and the `Vec::from(tracked)` conversion in
+// on-feature (records the final capacity sample, then unwraps `inner`).
+//
+// This pattern is currently provided for `Vec<T>` only.  If downstream code
+// hits the same boundary problem with other collection types (`HashMap`,
+// `IndexMap`, etc.), the same pattern extends mechanically — per-type traits
+// (`IntoHashMap`, `IntoIndexMap`, ...) with identity impls for the bare type
+// and conversion impls for the `Tracked*` wrapper.
+// ---------------------------------------------------------------------------
+
+/// Convert a `tvec!`-produced value into a plain `Vec<T>`.
+///
+/// Off-feature: identity move (`Vec<T>` returned as-is, no allocation, no
+/// clippy `useless_conversion` warning).
+///
+/// On-feature: records the final `capacity()` sample in the registry, then
+/// returns the inner `Vec<T>` (uses the `From<TrackedVec<T>> for Vec<T>` impl).
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::{tvec, IntoVec};
+/// fn build() -> Vec<u32> {
+///     let mut v = tvec!("doc/build", 16);
+///     v.push(1);
+///     v.into_vec() // compiles & is correct in BOTH feature modes
+/// }
+/// ```
+pub trait IntoVec<T> {
+    fn into_vec(self) -> Vec<T>;
+}
+
+impl<T> IntoVec<T> for Vec<T> {
+    #[inline]
+    fn into_vec(self) -> Vec<T> {
+        self
+    }
+}
+
+#[cfg(feature = "telemetry")]
+impl<T> IntoVec<T> for TrackedVec<T> {
+    #[inline]
+    fn into_vec(self) -> Vec<T> {
+        Vec::from(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 13 call-site macros
 //
 // CRITICAL: every off-feature expansion is wrapped in `{ #[allow(...)] expr }`
@@ -146,7 +206,7 @@ macro_rules! tvec {
 #[macro_export]
 macro_rules! tvec {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedVec::with_capacity_named($cap, $name)
+        $crate::TrackedVec::with_capacity_named($cap, $name, file!(), line!(), column!())
     };
 }
 
@@ -178,7 +238,7 @@ macro_rules! tvecdeque {
 #[macro_export]
 macro_rules! tvecdeque {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedVecDeque::with_capacity_named($cap, $name)
+        $crate::TrackedVecDeque::with_capacity_named($cap, $name, file!(), line!(), column!())
     };
 }
 
@@ -209,7 +269,7 @@ macro_rules! tbtreemap {
 #[macro_export]
 macro_rules! tbtreemap {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedBTreeMap::new_named($cap, $name)
+        $crate::TrackedBTreeMap::new_named($cap, $name, file!(), line!(), column!())
     };
 }
 
@@ -240,7 +300,7 @@ macro_rules! tbtreeset {
 #[macro_export]
 macro_rules! tbtreeset {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedBTreeSet::new_named($cap, $name)
+        $crate::TrackedBTreeSet::new_named($cap, $name, file!(), line!(), column!())
     };
 }
 
@@ -274,7 +334,7 @@ macro_rules! tbytesmut {
 #[macro_export]
 macro_rules! tbytesmut {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedBytesMut::with_capacity_named($cap, $name)
+        $crate::TrackedBytesMut::with_capacity_named($cap, $name, file!(), line!(), column!())
     };
 }
 
@@ -319,10 +379,23 @@ macro_rules! tfxmap {
 #[macro_export]
 macro_rules! tfxmap {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedHashMap::<_, _, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedHashMap::<_, _, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedHashMap::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedHashMap::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -363,10 +436,23 @@ macro_rules! tfxset {
 #[macro_export]
 macro_rules! tfxset {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedHashSet::<_, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedHashSet::<_, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedHashSet::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedHashSet::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -412,10 +498,23 @@ macro_rules! tmap {
 #[macro_export]
 macro_rules! tmap {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedIndexMap::<_, _, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedIndexMap::<_, _, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedIndexMap::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedIndexMap::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -458,10 +557,23 @@ macro_rules! tset {
 #[macro_export]
 macro_rules! tset {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedIndexSet::<_, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedIndexSet::<_, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedIndexSet::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedIndexSet::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -504,10 +616,23 @@ macro_rules! tdashmap {
 #[macro_export]
 macro_rules! tdashmap {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedDashMap::<_, _, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedDashMap::<_, _, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedDashMap::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedDashMap::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -550,10 +675,23 @@ macro_rules! tsccmap {
 #[macro_export]
 macro_rules! tsccmap {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedSccHashMap::<_, _, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedSccHashMap::<_, _, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedSccHashMap::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedSccHashMap::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -588,10 +726,23 @@ macro_rules! tsccset {
 #[macro_export]
 macro_rules! tsccset {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedSccHashSet::<_, $crate::CapHasher>::with_capacity_named($cap, $name)
+        $crate::TrackedSccHashSet::<_, $crate::CapHasher>::with_capacity_named(
+            $cap,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
     ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedSccHashSet::with_capacity_and_hasher_named($cap, $hasher, $name)
+        $crate::TrackedSccHashSet::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
     };
 }
 
@@ -617,7 +768,7 @@ macro_rules! tscctree {
 #[macro_export]
 macro_rules! tscctree {
     ($name:literal, $cap:expr) => {
-        $crate::TrackedSccTreeIndex::new_named($cap, $name)
+        $crate::TrackedSccTreeIndex::new_named($cap, $name, file!(), line!(), column!())
     };
 }
 

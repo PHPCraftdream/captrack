@@ -42,16 +42,20 @@ fn declare_collections_fxmap_also_works() {
 #[cfg(feature = "telemetry")]
 #[test]
 fn declare_collections_map_telemetry_recorded() {
-    use std::sync::atomic::Ordering;
-
     {
         let mut m = q_map!("declare/telemetry_map", 32);
         m.insert(1u32, "a");
     }
-    let peak = captrack::registry::registry()
-        .get(&"declare/telemetry_map")
-        .map(|e| e.peak_capacity.load(Ordering::Relaxed))
-        .unwrap_or(0);
+    let mut peak = 0usize;
+    captrack::registry::registry().scan(|_, stats| {
+        if stats.name == "declare/telemetry_map" {
+            if let Ok(v) = stats.samples.lock() {
+                if let Some(&max_here) = v.iter().max() {
+                    peak = peak.max(max_here);
+                }
+            }
+        }
+    });
     assert!(
         peak >= 32,
         "telemetry must be recorded through declare_collections! macro (peak={peak})"

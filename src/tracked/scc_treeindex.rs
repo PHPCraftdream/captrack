@@ -12,15 +12,28 @@ where
     V: Clone + 'static,
 {
     inner: scc::TreeIndex<K, V>,
+    #[allow(dead_code)]
     name: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
 }
 
 impl<K: Clone + Ord + 'static, V: Clone + 'static> TrackedSccTreeIndex<K, V> {
-    pub fn new_named(_cap_hint: usize, name: &'static str) -> Self {
-        registry::record_creation(name);
+    pub fn new_named(
+        _cap_hint: usize,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
         Self {
             inner: scc::TreeIndex::new(),
             name,
+            file,
+            line,
+            column,
         }
     }
 }
@@ -45,6 +58,6 @@ impl<K: Clone + Ord + 'static, V: Clone + 'static> Drop for TrackedSccTreeIndex<
         // O(N) ack: telemetry only — scc::TreeIndex::len() is a full traversal.
         #[allow(clippy::disallowed_methods)]
         let peak = self.inner.len();
-        registry::record_peak(self.name, peak);
+        registry::record_sample(self.file, self.line, self.column, peak);
     }
 }
