@@ -3,6 +3,7 @@
 //! See `docs/CAPACITY-PGO-PLAN.md` for the design rationale.
 
 mod cli;
+mod model;
 
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
