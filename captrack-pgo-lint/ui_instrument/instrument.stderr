@@ -1,0 +1,28 @@
+warning: captrack-pgo-instrument: wrapping `Vec` constructor for telemetry profiling
+  --> $DIR/instrument.rs:19:23
+   |
+LL |     let _v: Vec<u8> = Vec::new();
+   |                       ^^^^^^^^^^ help: instrument with TrackedX::with_capacity_named: `::captrack::TrackedVec::<_>::with_capacity_named(0, "auto:$DIR/instrument.rs:19:23", file!(), line!(), column!())`
+   |
+   = note: `#[warn(captrack_pgo_instrument)]` on by default
+
+warning: captrack-pgo-instrument: wrapping `Vec` constructor for telemetry profiling
+  --> $DIR/instrument.rs:22:24
+   |
+LL |     let _v2: Vec<u8> = Vec::with_capacity(8);
+   |                        ^^^^^^^^^^^^^^^^^^^^^ help: instrument with TrackedX::with_capacity_named: `::captrack::TrackedVec::<_>::with_capacity_named(8, "auto:$DIR/instrument.rs:22:24", file!(), line!(), column!())`
+
+warning: captrack-pgo-instrument: wrapping `HashMap` constructor for telemetry profiling
+  --> $DIR/instrument.rs:25:31
+   |
+LL |     let _m: HashMap<u8, u8> = HashMap::new();
+   |                               ^^^^^^^^^^^^^^ help: instrument with TrackedX::with_capacity_named: `::captrack::TrackedHashMap::<_, _>::with_capacity_named(0, "auto:$DIR/instrument.rs:25:31", file!(), line!(), column!())`
+
+warning: captrack-pgo-instrument: wrapping `BTreeMap` constructor for telemetry profiling
+  --> $DIR/instrument.rs:28:32
+   |
+LL |     let _b: BTreeMap<u8, u8> = BTreeMap::new();
+   |                                ^^^^^^^^^^^^^^^ help: instrument with TrackedX::with_capacity_named: `::captrack::TrackedBTreeMap::<_, _>::new_named(0, "auto:$DIR/instrument.rs:28:32", file!(), line!(), column!())`
+
+warning: 4 warnings emitted
+

@@ -1,4 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Mutex to serialize UI tests that mutate environment variables.
+///
+/// `dylint_testing::ui_test` internally takes its own mutex around the
+/// `compiletest` call, but our `set_var` calls happen *before* that lock.
+/// We use this outer mutex to ensure that env-var mutation and the subsequent
+/// `ui_test` call are atomic from the perspective of the other test thread.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Generate a combined profile JSON that covers both `detect.rs` and
 /// `suggest.rs` fixture files.  Each fixture's entries are generated
@@ -161,14 +170,42 @@ fn ui() {
     let profile_path = fixtures_dir.join("profile.json");
     std::fs::write(&profile_path, &profile_json).expect("write profile.json");
 
+    // Take the env mutex to prevent the `instrument` test from clobbering env
+    // vars while we are setting up and running this test.
+    let _guard = ENV_MUTEX.lock().unwrap();
+
     // Set the env var so the child compiler process (spawned by compiletest)
     // inherits it.
     //
-    // Safety: tests run single-threaded here; the env var is set before
-    // compiletest spawns any child processes.
+    // Safety: we hold ENV_MUTEX; only one of {ui, instrument} mutates env
+    // vars at a time.  The child process is spawned inside `ui_test` while
+    // we still hold the lock.
     unsafe {
+        std::env::remove_var("CAPTRACK_PGO_INSTRUMENT");
         std::env::set_var("CAPTRACK_PGO_PROFILE", &profile_path);
     }
 
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_dir);
+}
+
+#[test]
+fn instrument() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_instrument_dir = manifest_dir.join("ui_instrument");
+
+    // Take the env mutex to prevent the `ui` test from clobbering env vars
+    // while we are setting up and running this test.
+    let _guard = ENV_MUTEX.lock().unwrap();
+
+    // Clear the profile env var (the capacity lint must be a no-op during
+    // the instrument pass) and activate the instrument lint.
+    //
+    // Safety: we hold ENV_MUTEX; only one of {ui, instrument} mutates env
+    // vars at a time.
+    unsafe {
+        std::env::remove_var("CAPTRACK_PGO_PROFILE");
+        std::env::set_var("CAPTRACK_PGO_INSTRUMENT", "1");
+    }
+
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_instrument_dir);
 }

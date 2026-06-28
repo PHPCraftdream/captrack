@@ -19,6 +19,7 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyKind;
 use rustc_span::{FileName, Symbol};
 
+pub mod instrument;
 mod loader;
 mod model;
 mod rules;
@@ -27,7 +28,43 @@ use loader::Profile;
 use model::{CapExpr, Ctor, SiteKey};
 use rules::Decision;
 
-dylint_linting::impl_late_lint! {
+pub use instrument::CAPTRACK_PGO_INSTRUMENT;
+
+// ── Dual-lint registration ────────────────────────────────────────────────────
+//
+// `impl_late_lint!` generates `register_lints` and can be used only once per
+// cdylib.  Since this plugin hosts TWO lints (`CAPTRACK_PGO_CAPACITY` and
+// `CAPTRACK_PGO_INSTRUMENT`), we write `register_lints` by hand and use
+// `dylint_library!()` + `declare_lint!` / `impl_lint_pass!` directly.
+//
+// The `constituent` feature of `dylint_linting` is intentionally NOT used
+// because this crate is a self-contained cdylib, not a constituent of a larger
+// library.
+
+extern crate rustc_lint;
+extern crate rustc_session;
+
+dylint_linting::dylint_library!();
+
+#[unsafe(no_mangle)]
+pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint::LintStore) {
+    dylint_linting::init_config(sess);
+
+    // Check for dual-env-var conflict once per compilation.
+    instrument::maybe_warn_dual_vars();
+
+    // Register both lints so they appear in `cargo dylint --list`.
+    lint_store.register_lints(&[CAPTRACK_PGO_CAPACITY, CAPTRACK_PGO_INSTRUMENT]);
+
+    // Register the capacity lint pass — active only when PROFILE is set and
+    // INSTRUMENT is NOT set (instrument takes priority).
+    lint_store.register_late_pass(|_| Box::new(CaptrackPgoCapacity));
+
+    // Register the instrument lint pass — active only when INSTRUMENT is set.
+    lint_store.register_late_pass(|_| Box::new(instrument::CaptrackPgoInstrument));
+}
+
+rustc_session::declare_lint! {
     /// ### What it does
     ///
     /// Detects collection constructor call-sites (`Vec::new()`,
@@ -54,9 +91,11 @@ dylint_linting::impl_late_lint! {
     /// ```
     pub CAPTRACK_PGO_CAPACITY,
     Warn,
-    "collection constructor whose call-site has profile data suggesting a capacity hint",
-    CaptrackPgoCapacity
+    "collection constructor whose call-site has profile data suggesting a capacity hint"
 }
+
+rustc_session::impl_lint_pass!(CaptrackPgoCapacity => [CAPTRACK_PGO_CAPACITY]);
+rustc_session::impl_lint_pass!(instrument::CaptrackPgoInstrument => [CAPTRACK_PGO_INSTRUMENT]);
 
 #[derive(Default)]
 pub struct CaptrackPgoCapacity;
@@ -64,7 +103,7 @@ pub struct CaptrackPgoCapacity;
 /// Symbols for the collection types we care about.
 /// `Vec`, `HashMap`, `HashSet`, `BTreeMap` are in `rustc_span::sym::*`.
 /// `BTreeSet` and `VecDeque` are added by clippy_utils.
-const TRACKED_TYPES: &[Symbol] = &[
+pub(crate) const TRACKED_TYPES: &[Symbol] = &[
     sym::Vec,
     sym::VecDeque,
     sym::HashMap,
@@ -76,19 +115,25 @@ const TRACKED_TYPES: &[Symbol] = &[
 /// The `with_capacity_and_hasher` symbol — not in rustc predefined set, so we
 /// intern it on first use.  We use a `std::sync::OnceLock` so we don't call
 /// `Symbol::intern` in a hot path.
-fn sym_with_capacity_and_hasher() -> Symbol {
+pub(crate) fn sym_with_capacity_and_hasher() -> Symbol {
     use std::sync::OnceLock;
     static SYM: OnceLock<Symbol> = OnceLock::new();
     *SYM.get_or_init(|| Symbol::intern("with_capacity_and_hasher"))
 }
 
 /// Return true if `name` is one of the constructor method names we track.
-fn is_tracked_method(name: Symbol) -> bool {
+pub(crate) fn is_tracked_method(name: Symbol) -> bool {
     name == sym::new || name == sym::with_capacity || name == sym_with_capacity_and_hasher()
 }
 
 impl<'tcx> LateLintPass<'tcx> for CaptrackPgoCapacity {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // When INSTRUMENT is active, suppress the capacity lint — the user is
+        // doing an instrumentation pass, not a capacity-patch pass.
+        if instrument::instrument_enabled() {
+            return;
+        }
+
         // Fast-path: profile is empty (env var unset) → no work.
         let profile = loader::profile();
         if profile.is_empty() {
@@ -475,7 +520,7 @@ fn build_suggestion<'tcx>(
 /// (non-remapped) path from `RealFileName::local_path()`.  On Windows, paths
 /// may use backslashes — the profile must use the same representation that
 /// the compiler produces (not normalised).
-fn span_to_site_key(cx: &LateContext<'_>, span: rustc_span::Span) -> SiteKey {
+pub(crate) fn span_to_site_key(cx: &LateContext<'_>, span: rustc_span::Span) -> SiteKey {
     let sm = cx.tcx.sess.source_map();
     let loc = sm.lookup_char_pos(span.lo());
 
