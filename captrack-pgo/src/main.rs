@@ -5,6 +5,7 @@
 mod cli;
 mod model;
 mod profile;
+mod scan;
 mod workspace;
 
 fn main() -> anyhow::Result<()> {
