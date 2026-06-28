@@ -1,17 +1,13 @@
 //! captrack-pgo — profile-guided capacity optimization.
 //!
-//! See `docs/CAPACITY-PGO-PLAN.md` for the design rationale.
+//! See `docs/CAPACITY-PGO-PLAN.md` for the design rationale and
+//! `docs/CAPACITY-PGO-PLAN.md#path-b-migration-completed` for the
+//! description of the current Dylint-based pipeline.
 
-mod apply;
 mod cli;
 mod lint_apply;
 mod model;
-mod plan;
 mod profile;
-mod report;
-mod rules;
-mod scan;
-mod undo;
 mod workspace;
 
 fn main() -> anyhow::Result<()> {

@@ -1,11 +1,10 @@
 //! Shared data types for captrack-pgo.
 //!
-//! All other modules (`profile`, `scan`, `plan`, `apply`, `undo`) consume
-//! these.  Designed to be backend-agnostic — `SiteStats` carries whatever
-//! aggregate the profile backend produced, and the patcher doesn't care
-//! where the numbers came from.
+//! `profile/dhat.rs` and `profile/captrack.rs` produce `Vec<SiteStats>`.
+//! The new Dylint-based `apply` pipeline (orchestrated by `lint_apply.rs`)
+//! consumes those stats to set the `CAPTRACK_PGO_PROFILE` environment variable
+//! that the plugin reads during compilation.
 
-use std::ops::Range;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Unique identifier for an allocation call-site: source location.
 ///
 /// Two sites at the same `(file, line, col)` are considered the same — this
-/// is the contract that lets the AST scanner match against profile data.
+/// is the contract that lets the profile loader match against plugin-detected sites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SiteKey {
     pub file: PathBuf,
@@ -26,8 +25,6 @@ pub struct SiteKey {
 ///
 /// dhat-backed profiles produce byte counts (allocator has no T info);
 /// captrack-backed profiles produce element counts (each Tracked* knows T).
-/// Rules need this to decide whether to recommend a `with_capacity(N)`
-/// directly (elements) or report `N bytes — divide by size_of::<T>` (bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Unit {
     Bytes,
@@ -44,67 +41,6 @@ pub struct SiteStats {
     pub p50: usize,
     pub p95: usize,
     pub count: u64,
-}
-
-/// Constructor kind found at an allocation site by the AST scanner.
-///
-/// Used to decide which capacity-bearing replacement to emit (`Vec::new()` →
-/// `Vec::with_capacity(N)` is straightforward; `with_capacity_and_hasher` is
-/// preserved verbatim with just the cap argument replaced).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Ctor {
-    Vec,
-    VecDeque,
-    HashMap,
-    HashSet,
-    BTreeMap,
-    BTreeSet,
-}
-
-/// What the current source code says the capacity is at this site.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CapExpr {
-    /// `with_capacity(N)` with a literal integer N.
-    Literal(usize),
-    /// `Vec::new()` / `vec![]` / `BTreeMap::new()` — no capacity hint.
-    Zero,
-    /// `with_capacity(expr)` where expr is not a literal (e.g. `input.len()`).
-    /// Preserves the source text verbatim for reporting; patcher should
-    /// Skip such sites unless explicitly forced.
-    Dynamic(String),
-}
-
-/// One allocation site discovered by the AST scanner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AllocSite {
-    pub key: SiteKey,
-    pub ctor: Ctor,
-    pub current_cap: CapExpr,
-    /// Byte range within the source file that should be REPLACED by the
-    /// patcher.  For `Vec::with_capacity(0)` this is the `0` token; for
-    /// `Vec::new()` this is the entire `Vec::new()` call; for `vec![]` this
-    /// is the entire `vec![]` invocation.  The replacement text is the
-    /// full new constructor call when needed.
-    pub span_bytes: Range<usize>,
-}
-
-/// One patch decision the planner made for a matched (site, stats) pair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatchEntry {
-    pub key: SiteKey,
-    pub ctor: Ctor,
-    pub from: CapExpr,
-    pub to: usize,
-    pub span_bytes: Range<usize>,
-    pub reason: String,
-}
-
-/// The full plan produced by `plan::build_plan`: what to patch and what was
-/// looked at but deliberately skipped (with reason).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatchPlan {
-    pub entries: Vec<PatchEntry>,
-    pub skipped: Vec<(SiteKey, String)>,
 }
 
 #[cfg(test)]
@@ -132,32 +68,6 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SiteStats = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
-    }
-
-    #[test]
-    fn patch_plan_round_trip() {
-        let plan = PatchPlan {
-            entries: vec![PatchEntry {
-                key: sample_key(),
-                ctor: Ctor::Vec,
-                from: CapExpr::Zero,
-                to: 64,
-                span_bytes: 100..115,
-                reason: "next_pow2(p95)".to_string(),
-            }],
-            skipped: vec![(sample_key(), "low count".to_string())],
-        };
-        let json = serde_json::to_string(&plan).unwrap();
-        let back: PatchPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(plan, back);
-    }
-
-    #[test]
-    fn cap_expr_dynamic_round_trip() {
-        let c = CapExpr::Dynamic("input.len() * 2".to_string());
-        let json = serde_json::to_string(&c).unwrap();
-        let back: CapExpr = serde_json::from_str(&json).unwrap();
-        assert_eq!(c, back);
     }
 
     #[test]

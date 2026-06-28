@@ -122,6 +122,77 @@ pub trait IntoInner: Sized {
 
 `From<TrackedX> for StdX` (and `IntoIterator` impls) use `unsafe { std::ptr::read(&tracked.inner) }` + `std::mem::forget(tracked)` to move the inner value without requiring `S: Default` or `S: Clone` on the hasher type parameter.
 
+## captrack-pgo — profile-guided capacity optimization CLI
+
+`captrack-pgo/` is a separate bin-crate in the workspace (not part of the
+captrack library).  Its pipeline as of M5 (Path-B migration, 2026-06-28):
+
+```
+captrack dump (profile.json)
+        │
+        ▼
+captrack-pgo apply --profile profile.json
+        │  sets CAPTRACK_PGO_PROFILE env var
+        ▼
+cargo dylint --path captrack-pgo-lint --fix
+        │  HIR-level semantic detection + rustfix suggestions
+        ▼
+source files rewritten in place
+        │
+        ▼
+last-lint-apply.json  (before/after snapshot manifest)
+        │
+        ▼
+captrack-pgo undo  (restores files from manifest)
+```
+
+### Module map (captrack-pgo)
+
+| Module | Purpose |
+|---|---|
+| `src/cli.rs` | Three subcommands: `measure` (stub), `apply` (Dylint orchestration), `undo` |
+| `src/lint_apply.rs` | Core of `apply`: pre-flight, snapshot before, run `cargo dylint --fix`, diff and write manifest; also `undo_lint_apply` |
+| `src/model.rs` | `SiteKey`, `SiteStats`, `Unit` — used by profile loaders |
+| `src/profile/mod.rs` | `trait Profile { fn sites() -> Vec<SiteStats> }` |
+| `src/profile/captrack.rs` | Parses `captrack::dump_capacity_stats` JSON output |
+| `src/profile/dhat.rs` | Parses `dhat-heap.json` (byte-level, v2 format) |
+| `src/workspace.rs` | `find_workspace_root` + `walk_rust_files` (gitignore-aware) |
+
+### Manifest format (v1)
+
+Written to `target/captrack-pgo/last-lint-apply.json`:
+
+```json
+{
+  "version": 1,
+  "profile_path": "/abs/path/to/profile.json",
+  "files": [
+    {
+      "file": "/abs/path/to/src/lib.rs",
+      "sha256_before": "<64 hex chars>",
+      "content_before": "fn original() {}",
+      "sha256_after": "<64 hex chars>"
+    }
+  ]
+}
+```
+
+`undo` restores `content_before` after verifying the current file matches
+`sha256_after` (refuses if the file was edited after `apply`).
+
+### Requirements for `apply`
+
+- `cargo install cargo-dylint dylint-link`
+- Nightly toolchain pinned in `captrack-pgo-lint/rust-toolchain.toml`
+- The `captrack-pgo-lint/` directory (sibling of `captrack-pgo/` in this workspace)
+
+### What was removed (M5)
+
+The syn-based pipeline (`scan.rs`, `plan.rs`, `rules.rs`, `report.rs`,
+`apply.rs`, `undo.rs`) and the `propose`/`auto` subcommands were deleted.
+Old `last-apply.json` manifests (byte-splice format) can no longer be
+reverted via `undo` — use `git` instead.
+
 ## Adding a new tracked collection — checklist
 
 1. `src/tracked/<name>.rs` — `Tracked<Name>` struct with fields `inner`, `name: &'static str`, `file: &'static str`, `line: u32`, `column: u32`.  Implement:

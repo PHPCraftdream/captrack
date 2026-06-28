@@ -4,6 +4,38 @@ All notable changes to `captrack` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### `captrack-pgo` — BREAKING CHANGES (M5: Path-B migration completed)
+
+The syn-based `propose` / `apply` (old) / `auto` subcommands and their
+underlying pipeline (`scan.rs`, `plan.rs`, `rules.rs`, `report.rs`,
+`apply.rs`) have been **removed**.  They are replaced by a single Dylint-based
+`apply` subcommand that delegates to `cargo dylint --fix` via the
+`captrack-pgo-lint` plugin.
+
+**What changed:**
+
+- `captrack-pgo apply` now means the Dylint-driven rewrite (formerly
+  `lint-apply`).  The old syn-based `apply` (byte-splice patcher) is gone.
+- `captrack-pgo propose` — removed.  Use `captrack-pgo apply --dry-run`.
+- `captrack-pgo auto` — removed.  Use `captrack-pgo apply`.
+- `captrack-pgo undo` — simplified.  Only handles the new
+  `last-lint-apply.json` manifest format; the old `last-apply.json` (v1,
+  syn-based) is no longer producible and can no longer be reverted with
+  `undo`.  If you have an old manifest from before M5, restore via `git`.
+- Dependencies `syn`, `quote`, `proc-macro2`, `walkdir` removed from
+  `captrack-pgo/Cargo.toml`.
+
+**Why the switch:**
+
+The syn-based matcher had coverage gaps: it could not resolve type aliases,
+`Default::default()` calls, or constructors inside macro expansions.  The
+Dylint plugin operates on rustc's HIR after type-checking, giving true
+semantic resolution with no false negatives for standard collection types.
+The trade-off is a nightly pin in the plugin workspace — accepted at the
+user's direction (M4 decision, 2026-06-28).
+
 ## 0.1.0 — initial release
 
 ### Added

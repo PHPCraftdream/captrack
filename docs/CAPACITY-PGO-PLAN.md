@@ -318,3 +318,69 @@ inline. Фикстуры — крошечные `.rs`-сэмплы под `captr
 
 Против ~2000 LOC самопального instrument+de-instrument с boundary-fix
 (который dhat убирает целиком) — экономия ~40% и точнее данные.
+
+---
+
+## Path B Migration (completed — 2026-06-28)
+
+> The plan above (phases 0–5, steps 1–13) describes the **original Path A**
+> implementation: a syn-based AST scanner matched profile sites to source
+> locations and applied byte-splice patches.  That pipeline was completed
+> through M4 but replaced in M5 with a semantically stronger approach.
+
+### What changed and why
+
+**Problem with Path A (syn-based):**
+The syn AST matcher had three coverage gaps that blocked real-world adoption:
+
+1. **Type aliases** — `type MyVec<T> = Vec<T>; MyVec::new()` was not
+   recognised because `syn` only sees the surface syntax, not the resolved
+   type.
+2. **`Default::default()` calls** — constructors via the `Default` trait were
+   invisible to pattern matching on constructor names.
+3. **Macro-expanded constructors** — collections created inside `vec![]` or
+   other macros after expansion were inaccessible to syn's pre-expansion AST.
+
+**Solution — Path B (Dylint plugin):**
+
+Replace the syn matcher with a Dylint lint plugin (`captrack-pgo-lint/`) that
+operates on rustc's HIR after type-checking.  The plugin:
+
+- Detects collection constructors via `clippy_utils` path resolution — works
+  for aliases, `Default`, and macro expansions.
+- Reads `CAPTRACK_PGO_PROFILE` to filter to matched sites.
+- Emits `rustfix`-compatible `Suggestion`s that `cargo dylint --fix` applies.
+
+**Trade-off accepted:**
+
+The plugin must be compiled against a pinned nightly toolchain
+(`nightly-2026-04-16` in `captrack-pgo-lint/rust-toolchain.toml`) because
+`clippy_utils` is only available on nightly.  The CLI itself (`captrack-pgo`)
+remains on stable Rust.  This nightly dependency is isolated to the plugin
+compilation step and does not affect consumers of the `captrack` library.
+
+### New pipeline (M5 onward)
+
+```
+captrack dump (profile.json)
+        │
+        ▼
+captrack-pgo apply --profile profile.json
+        │  sets CAPTRACK_PGO_PROFILE
+        ▼
+cargo dylint --path captrack-pgo-lint --fix
+        │  HIR detection + rustfix suggestions
+        ▼
+source files rewritten in place
+        │
+        ▼
+last-lint-apply.json  (before/after snapshot for undo)
+```
+
+### What was removed
+
+- `src/scan.rs`, `src/plan.rs`, `src/rules.rs`, `src/report.rs`,
+  `src/apply.rs`, `src/undo.rs` — syn pipeline.
+- CLI subcommands `propose`, `auto`, and the old `apply` (syn-based).
+- `last-apply.json` manifest format (byte-splice, v1) — no longer producible.
+- Cargo deps: `syn`, `quote`, `proc-macro2`, `walkdir`.

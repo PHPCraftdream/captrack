@@ -1,12 +1,10 @@
-//! `lint-apply` subcommand — orchestrates `cargo dylint --fix` as a subprocess.
+//! `apply` subcommand — orchestrates `cargo dylint --fix` as a subprocess.
 //!
-//! ## Manifest design (Option B)
+//! ## Manifest
 //!
-//! Rather than extending the existing `ApplyManifest` v1 format, this command
-//! writes a parallel `last-lint-apply.json` in the same `.../target/captrack-pgo/`
-//! directory.  The `undo` command detects and reverts whichever manifest is
-//! newest.  This keeps the existing `apply.rs`/`undo.rs` code entirely
-//! untouched — the two apply paths coexist cleanly until M5.
+//! After a successful apply, a `last-lint-apply.json` is written under
+//! `target/captrack-pgo/`.  The `undo` subcommand reads this manifest to
+//! restore files to their pre-apply state.
 //!
 //! ## `cargo dylint` invocation (version assumption: cargo-dylint 6.0.1)
 //!
@@ -355,7 +353,7 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
 
     let n = changed_files.len();
     println!(
-        "lint-apply: modified {} file{}, net {} byte{} changed",
+        "apply: modified {} file{}, net {} byte{} changed",
         n,
         if n == 1 { "" } else { "s" },
         total_bytes_changed,

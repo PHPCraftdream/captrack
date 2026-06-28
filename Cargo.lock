@@ -152,14 +152,10 @@ dependencies = [
  "captrack",
  "clap",
  "ignore",
- "proc-macro2",
- "quote",
  "serde",
  "serde_json",
  "sha2",
- "syn",
  "tempfile",
- "walkdir",
 ]
 
 [[package]]

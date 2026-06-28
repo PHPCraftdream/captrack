@@ -217,6 +217,35 @@ When `telemetry` is enabled the macros return `Tracked*` wrappers:
 All wrappers implement `Deref`/`DerefMut` to the underlying collection so
 existing code continues to work transparently.
 
+## Profile-guided capacity optimization (`captrack-pgo`)
+
+`captrack-pgo` is a companion CLI in this workspace that closes the
+measure-apply loop:
+
+1. **Measure** — run your benchmark with `telemetry` enabled and call
+   `captrack::dump_capacity_stats("profile.json")` to capture per-call-site
+   statistics.
+2. **Apply** — let the Dylint plugin rewrite your source with data-driven
+   capacity hints:
+
+   ```text
+   captrack-pgo apply --profile profile.json [--workspace <path>] [--dry-run]
+   ```
+
+   Internally this runs `cargo dylint --fix` with the `captrack-pgo-lint`
+   plugin, which resolves collection constructors at the semantic (HIR) level
+   and emits `rustfix` suggestions.  A before/after manifest is written to
+   `target/captrack-pgo/last-lint-apply.json`.
+
+3. **Undo** — revert the last apply:
+
+   ```text
+   captrack-pgo undo
+   ```
+
+**Requirements:** `cargo install cargo-dylint dylint-link` and the
+`nightly-2026-04-16` toolchain (pinned in `captrack-pgo-lint/rust-toolchain.toml`).
+
 ## License
 
 Licensed under either of

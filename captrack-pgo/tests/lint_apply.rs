@@ -1,9 +1,9 @@
-//! Integration tests for the `lint-apply` subcommand.
+//! Integration tests for the `apply` subcommand (Dylint-based rewrite).
 //!
 //! # How the tests work
 //!
 //! Each test spins up a temporary mini-workspace (a `[workspace]` `Cargo.toml`
-//! plus a `src/lib.rs`) and invokes `captrack-pgo lint-apply` as a subprocess.
+//! plus a `src/lib.rs`) and invokes `captrack-pgo apply` as a subprocess.
 //!
 //! # Gate — `#[ignore]`
 //!
@@ -41,7 +41,7 @@ fn make_workspace(src_content: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
 
-    // Minimal workspace Cargo.toml — lint-apply does not require workspace
+    // Minimal workspace Cargo.toml — apply does not require workspace
     // members; it needs [workspace] and Cargo.toml to exist.
     std::fs::write(
         root.join("Cargo.toml"),
@@ -85,12 +85,7 @@ fn make_workspace(src_content: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// `--dry-run` must succeed, print the "dry-run" notice, NOT modify any file,
-/// NOT write a manifest, even with an invalid `--lint-path` (because pre-flight
-/// for the lint-path happens before the subprocess but still prints the plan
-/// regardless... actually let's use a valid-looking lint path that just can't be run).
-///
-/// Wait — the pre-flight DOES check the lint-path before entering dry-run print.
-/// Supply a real lint-path (the sibling captrack-pgo-lint dir) so pre-flight passes,
+/// NOT write a manifest.  Supply a real lint-path so pre-flight passes,
 /// then dry-run will print without actually running cargo-dylint.
 #[test]
 fn dry_run_prints_notice_and_does_not_modify_files() {
@@ -103,7 +98,7 @@ fn dry_run_prints_notice_and_does_not_modify_files() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--dry-run", "--profile"])
+        .args(["apply", "--dry-run", "--profile"])
         .arg(&profile_path)
         .arg("--lint-path")
         .arg(&lint_path)
@@ -149,7 +144,7 @@ fn missing_profile_exits_with_error() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--profile", "/nonexistent/profile.json"])
+        .args(["apply", "--profile", "/nonexistent/profile.json"])
         .arg("--lint-path")
         .arg(&lint_path)
         .arg("--workspace")
@@ -183,7 +178,7 @@ fn invalid_lint_path_exits_with_error() {
     std::fs::write(&profile_path, r#"{"version":1,"stats":[]}"#).unwrap();
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--profile"])
+        .args(["apply", "--profile"])
         .arg(&profile_path)
         .arg("--lint-path")
         .arg("/nonexistent/lint/path")
@@ -212,7 +207,7 @@ fn missing_workspace_exits_with_error() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--profile"])
+        .args(["apply", "--profile"])
         .arg(&profile_path)
         .arg("--lint-path")
         .arg(&lint_path)
@@ -233,7 +228,7 @@ fn missing_workspace_exits_with_error() {
 // Run with: cargo test --test lint_apply -- --ignored
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// `lint-apply` applies `--fix` suggestions to a minimal workspace, modifies
+/// `apply` applies `--fix` suggestions to a minimal workspace, modifies
 /// the source, and writes a manifest.
 ///
 /// # Caveats
@@ -244,7 +239,7 @@ fn missing_workspace_exits_with_error() {
 ///   the cdylib (~5–10 min); subsequent runs use the cache.
 #[test]
 #[ignore = "requires nightly toolchain + cargo-dylint (cargo test --test lint_apply -- --ignored)"]
-fn live_lint_apply_rewrites_vec_new_and_writes_manifest() {
+fn live_apply_rewrites_vec_new_and_writes_manifest() {
     let src = "pub fn f() { let _v: Vec<u8> = Vec::new(); }\n";
     let (tmp, lib_rs, profile_path) = make_workspace(src);
     let root = tmp.path();
@@ -253,7 +248,7 @@ fn live_lint_apply_rewrites_vec_new_and_writes_manifest() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--profile"])
+        .args(["apply", "--profile"])
         .arg(&profile_path)
         .arg("--lint-path")
         .arg(&lint_path)
@@ -308,7 +303,7 @@ fn live_dry_run_does_not_modify_and_no_manifest() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
 
     let out = Command::new(bin())
-        .args(["lint-apply", "--dry-run", "--profile"])
+        .args(["apply", "--dry-run", "--profile"])
         .arg(&profile_path)
         .arg("--lint-path")
         .arg(&lint_path)

@@ -16,14 +16,10 @@ categories = ["development-tools::profiling", "command-line-utilities"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }  # КРИТИЧНО для file:line:col из spans
-quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-walkdir = "2"
 anyhow = "1"
-ignore = "0.4"  # gitignore-aware walk
+ignore = "0.4"  # gitignore-aware walk (used by workspace::walk_rust_files)
 sha2 = "0.10"
 tempfile = "3"
 captrack = { path = "..", default-features = false }
