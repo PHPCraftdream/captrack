@@ -95,8 +95,13 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Undo { manifest } => {
             run_undo(manifest)?;
         }
-        Command::Auto { .. } => {
-            eprintln!("auto: not yet implemented");
+        Command::Auto {
+            workspace,
+            heap,
+            captrack_dump,
+            apply,
+        } => {
+            run_auto(workspace, heap, captrack_dump, apply)?;
         }
     }
     Ok(())
@@ -192,6 +197,57 @@ fn run_undo(manifest: Option<PathBuf>) -> anyhow::Result<()> {
         if n == 1 { "" } else { "es" },
         path.display()
     );
+    Ok(())
+}
+
+fn run_auto(
+    workspace: Option<PathBuf>,
+    heap: Option<PathBuf>,
+    captrack_dump: Option<PathBuf>,
+    apply: bool,
+) -> anyhow::Result<()> {
+    // 1. Build plan via the shared helper.
+    let (root, plan) = build_plan_from_profile(workspace, heap, captrack_dump)?;
+
+    // 2. Always print the report (with relativized paths for readability).
+    {
+        let mut display_plan = plan.clone();
+        for entry in &mut display_plan.entries {
+            entry.key.file = relativize(&entry.key.file, &root);
+        }
+        for (key, _) in &mut display_plan.skipped {
+            key.file = relativize(&key.file, &root);
+        }
+        print!("{}", crate::report::render_report(&display_plan));
+    }
+
+    // 3. If --apply and there are entries, run apply.
+    if apply && !plan.entries.is_empty() {
+        let manifest = crate::apply::apply_plan(&plan, &root, false)?;
+        let manifest_path = root
+            .join("target")
+            .join("captrack-pgo")
+            .join("last-apply.json");
+        println!();
+        println!(
+            "applied {} patch{}",
+            manifest.entries.len(),
+            if manifest.entries.len() == 1 {
+                ""
+            } else {
+                "es"
+            }
+        );
+        println!("  manifest: {}", manifest_path.display());
+        println!("  undo with: captrack-pgo undo");
+    } else if apply {
+        println!();
+        println!("(plan is empty — nothing to apply)");
+    } else {
+        println!();
+        println!("(dry-run; pass --apply to commit changes)");
+    }
+
     Ok(())
 }
 
