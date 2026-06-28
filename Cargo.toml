@@ -28,6 +28,7 @@ include = [
 
 [workspace]
 members = [".", "captrack-macros", "captrack-pgo"]
+exclude = ["captrack-pgo-lint"]
 
 [features]
 default = []

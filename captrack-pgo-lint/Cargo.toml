@@ -1,0 +1,27 @@
+[package]
+name = "captrack-pgo-lint"
+version = "0.1.0"
+edition = "2021"
+authors = ["Marat K <phpcraftdream@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Dylint plugin powering captrack-pgo semantic apply: rewrites collection constructors based on profile-data recommendations."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = "0.1.97"
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+# Standalone workspace — NOT a member of the captrack stable workspace.
+# The captrack root Cargo.toml also has exclude = ["captrack-pgo-lint"].
+# Both are required: the exclude prevents cargo from auto-discovering us,
+# and this empty [workspace] prevents us from auto-joining the parent.
+[workspace]
