@@ -2,11 +2,29 @@
 name = "captrack"
 version = "0.1.0"
 edition = "2021"
+authors = ["Marat K <phpcraftdream@gmail.com>"]
+rust-version = "1.74"
 description = "Capacity telemetry for Rust collections — call-site macros that record peak capacity, with zero overhead when disabled."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/example/captrack" # TODO: replace with real repo URL before publishing
+# TODO: replace with real URLs before publishing
+homepage = "https://github.com/example/captrack"
+documentation = "https://docs.rs/captrack"
+readme = "README.md"
 keywords = ["telemetry", "capacity", "profiling", "collections", "performance"]
 categories = ["development-tools::profiling"]
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "clippy.toml.example",
+]
 
 [workspace]
 members = [".", "captrack-macros"]
@@ -53,6 +71,11 @@ fxhash     = { version = "0.2",  optional = true }
 ahash      = { version = "0.8",  optional = true }
 foldhash   = { version = "0.1",  optional = true }
 rustc-hash = { version = "2",    optional = true }
+
+[package.metadata.docs.rs]
+# Build docs with all features so users see the full API on docs.rs.
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
 # Needed for the crate's own test suite which exercises macros that expand
