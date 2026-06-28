@@ -140,6 +140,7 @@ name = "captrack-pgo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "captrack",
  "clap",
  "ignore",
  "proc-macro2",

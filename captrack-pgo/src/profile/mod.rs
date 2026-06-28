@@ -9,8 +9,8 @@
 
 use crate::model::SiteStats;
 
+pub mod captrack;
 pub mod dhat;
-// pub mod captrack;  // added in Step 5
 
 pub trait Profile {
     fn sites(&self) -> anyhow::Result<Vec<SiteStats>>;

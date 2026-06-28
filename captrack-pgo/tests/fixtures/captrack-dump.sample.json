@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "stats": [
+    {
+      "name": "engine/write_batch",
+      "file": "crates/engine/src/write.rs",
+      "line": 142,
+      "column": 17,
+      "creation_count": 1234,
+      "samples": [16, 32, 32, 64, 64, 64, 128, 128, 256, 1024]
+    },
+    {
+      "name": "engine/cold_path",
+      "file": "crates/engine/src/cold.rs",
+      "line": 88,
+      "column": 9,
+      "creation_count": 1,
+      "samples": []
+    }
+  ]
+}
