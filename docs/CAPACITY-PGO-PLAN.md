@@ -384,3 +384,101 @@ last-lint-apply.json  (before/after snapshot for undo)
 - CLI subcommands `propose`, `auto`, and the old `apply` (syn-based).
 - `last-apply.json` manifest format (byte-splice, v1) — no longer producible.
 - Cargo deps: `syn`, `quote`, `proc-macro2`, `walkdir`.
+
+---
+
+## Path C — full auto-instrument + hasher (planned)
+
+> Path B (M1–M5) delivered the `apply` half. Path C closes the loop: the user
+> never touches collection constructors by hand; a single CLI flow instruments,
+> profiles, restores, and applies in one round-trip.
+
+### Target user workflow
+
+```bash
+# 1. Auto-wrap every bare Vec::new() / HashMap::new() etc. into TrackedX::with_capacity_named(...)
+captrack-pgo instrument --workspace .
+
+# 2. Run any bench/test as usual — captrack telemetry already records peaks
+cargo test --features captrack/telemetry
+
+# 3. Dump the captrack profile (the user's bench code calls dump_capacity_stats)
+#    Then revert the instrumentation:
+captrack-pgo uninstrument --workspace .
+
+# 4. Apply final optimisations (capacity + chosen hasher) to the now-restored vanilla code
+captrack-pgo apply --profile dump.json --workspace . --hasher fx
+```
+
+End result: source returns to vanilla shape, but every `Vec::new()` becomes
+`Vec::with_capacity(N)` and every `HashMap::new()` becomes
+`HashMap::with_capacity_and_hasher(N, ::fxhash::FxBuildHasher::default())` (or
+the hasher chosen via `--hasher`).
+
+### Design decisions (locked)
+
+1. **Instrument form = direct constructor call**, not a macro.
+   Replacement: `Vec::new()` → `::captrack::TrackedVec::<_>::with_capacity_named(0, file!(), line!(), column!())`.
+   Rationale: no dependence on macro-import resolution, easier to debug, the
+   `::captrack::` absolute path works regardless of the user's `use` lines.
+   The downside (verbosity) is invisible to the human — code is restored
+   afterwards by `uninstrument`.
+2. **Hasher choice = CLI parameter**, defaulting to `none` (preserves `RandomState`).
+   Options: `fx` (`::fxhash::FxBuildHasher::default()`), `ahash`
+   (`::ahash::RandomState::new()`), `foldhash`
+   (`::foldhash::fast::RandomState::default()`), `none` (skip).
+   The chosen hasher path is emitted with a leading `::` (absolute) so the
+   plugin never has to add `use` lines.
+3. **Hasher swap is part of `apply`** (not a separate subcommand). For each
+   matched `HashMap`/`HashSet` (and the third-party hash-keyed types we already
+   handle) the plugin upgrades the constructor to the hasher-bearing form
+   when `--hasher` is set to anything other than `none`.
+4. **Instrument/uninstrument use the same manifest format** as `apply`:
+   per-file before/after snapshot + sha256. `undo` becomes generic across all
+   three operations.
+
+### Milestones
+
+- **M6 — `CAPTRACK_PGO_INSTRUMENT` lint.** New lint in `captrack-pgo-lint`,
+  active when env var `CAPTRACK_PGO_INSTRUMENT=1` is set (mutually exclusive
+  with `CAPTRACK_PGO_PROFILE`). Replaces every bare std collection
+  constructor with the absolute `::captrack::TrackedX::with_capacity_named(...)`
+  form. `MachineApplicable`. Skips sites already inside a `Tracked*` call.
+  UI tests for Vec/VecDeque/HashMap/HashSet/BTreeMap/BTreeSet.
+
+- **M7 — `captrack-pgo instrument` subcommand.** Orchestrates
+  `cargo dylint --fix` with `CAPTRACK_PGO_INSTRUMENT=1`. Reuses the existing
+  before/after manifest infrastructure (`last-lint-apply.json` renamed to
+  `last-lint.json` or kept generic). Pre-flight: warns if `captrack` is not a
+  dep of the target workspace, or its `telemetry` feature is not enabled.
+
+- **M8 — `captrack-pgo uninstrument` subcommand.** Reverts the latest
+  instrument manifest. Effectively a thin wrapper around the generic undo path
+  with a clearer name; rejects with a helpful message if the latest manifest
+  is from `apply` (those should go through `undo`).
+
+- **M9 — `--hasher` flag in `apply`.** Extend `CAPTRACK_PGO_CAPACITY` lint to
+  optionally emit hasher-bearing constructor forms based on a new env var
+  `CAPTRACK_PGO_HASHER` ("fx" | "ahash" | "foldhash" | unset). For
+  `HashMap::new()` with hasher=fx → suggest
+  `HashMap::with_capacity_and_hasher(N, ::fxhash::FxBuildHasher::default())`.
+  Extend `apply` CLI with `--hasher` flag that sets the env var. Type
+  parameter handling: when adding a hasher to a `HashMap<K,V>`, the type
+  parameter list must be extended to `HashMap<K, V, ::fxhash::FxBuildHasher>` —
+  the plugin must either rewrite the variable's type ascription
+  (`let m: HashMap<K,V> = ...` → `let m: HashMap<K,V,::fxhash::FxBuildHasher> = ...`)
+  or accept that some sites compile only via inference. Document the
+  limitation and emit the suggestion only when inference is guaranteed to
+  work (no explicit `Map<K,V>` ascription).
+
+### Open questions for Path C
+
+- **Third-party hash-keyed types** (`IndexMap`, `DashMap`, `scc::HashMap`):
+  do we also rewrite their constructors? Yes for consistency, but each
+  third-party type has its own `with_hasher` signature variation — needs
+  per-type rules.
+- **Cargo.toml dep auto-add.** When `--hasher fx` is used, the workspace must
+  depend on `fxhash`. `apply` could emit a warning rather than mutating
+  `Cargo.toml`. Decision: **warn only**, user manages deps.
+- **Hashing for BTree* / Vec*** — no hasher applies; `--hasher` skips them
+  silently.
