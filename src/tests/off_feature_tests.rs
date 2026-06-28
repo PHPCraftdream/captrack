@@ -198,6 +198,60 @@ fn into_inner_supports_chained_method_inference() {
     let _: Vec<u32> = raw; // post-hoc proof: inferred type IS Vec<u32>
 }
 
+// N1: type-equality proof for off-feature aliases.
+// Verifies that TrackedX<T> IS the bare std/third-party type (zero-overhead
+// alias contract). If someone accidentally wraps TrackedVec in a newtype
+// off-feature, TypeId::of::<TrackedVec<u32>>() != TypeId::of::<Vec<u32>>() and
+// this test fails.
+#[cfg(not(feature = "telemetry"))]
+#[test]
+fn off_feature_aliases_are_type_equal_to_bare_types() {
+    use std::any::TypeId;
+    assert_eq!(
+        TypeId::of::<crate::TrackedVec<u32>>(),
+        TypeId::of::<Vec<u32>>()
+    );
+    assert_eq!(
+        TypeId::of::<crate::TrackedVecDeque<u32>>(),
+        TypeId::of::<std::collections::VecDeque<u32>>()
+    );
+    assert_eq!(
+        TypeId::of::<crate::TrackedBTreeMap<u32, u32>>(),
+        TypeId::of::<std::collections::BTreeMap<u32, u32>>()
+    );
+    assert_eq!(
+        TypeId::of::<crate::TrackedBTreeSet<u32>>(),
+        TypeId::of::<std::collections::BTreeSet<u32>>()
+    );
+    // HashMap/HashSet use CapHasher as default — compare against the same type expression.
+    use std::collections::{HashMap, HashSet};
+    assert_eq!(
+        TypeId::of::<crate::TrackedHashMap<u32, u32>>(),
+        TypeId::of::<HashMap<u32, u32, crate::CapHasher>>()
+    );
+    assert_eq!(
+        TypeId::of::<crate::TrackedHashSet<u32>>(),
+        TypeId::of::<HashSet<u32, crate::CapHasher>>()
+    );
+}
+
+// N2: into_inner is a pure identity move off-feature, not a From conversion.
+// Proves the move does not reallocate or copy: the pointer and capacity are
+// preserved across the call boundary (i.e. no realloc, no From::from round-trip).
+#[cfg(not(feature = "telemetry"))]
+#[test]
+fn off_feature_into_inner_is_pure_identity() {
+    use crate::IntoInner;
+    // Verify that this is a move, not a clone/conversion — via pointer identity.
+    let v: Vec<u32> = tvec!("test/identity", 32);
+    let ptr_before = v.as_ptr();
+    let cap_before = v.capacity();
+    let w = v.into_inner();
+    // Move: pointer AND capacity are preserved (no realloc, no copy).
+    assert_eq!(w.as_ptr(), ptr_before);
+    assert_eq!(w.capacity(), cap_before);
+}
+
 /// Verify that CapHasher is RandomState when no hasher feature is active.
 /// This is a type-inference test — the map must accept standard random keys.
 #[cfg(not(any(

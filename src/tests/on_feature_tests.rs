@@ -445,3 +445,215 @@ fn tbtreemap_into_iter_records_peak_before_consume() {
         "peak must be recorded (via len) before inner is consumed by into_iter"
     );
 }
+
+// ── N4: into_iter regressions for remaining 4 wrappers ───────────────────────
+
+#[test]
+fn tfxset_into_iter_records_peak_before_consume() {
+    // TrackedHashSet uses capacity() as metric.
+    // Regression: if record_sample is removed before ptr::read, Drop records 0.
+    {
+        let mut s: TrackedHashSet<u32> = tfxset!("on/fxset_iter", 32);
+        s.insert(1);
+        s.insert(2);
+        let _collected: Vec<u32> = s.into_iter().collect();
+    }
+    assert!(
+        peak("on/fxset_iter") >= 32,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tset_into_iter_records_peak_before_consume() {
+    // TrackedIndexSet uses capacity() as metric.
+    {
+        let mut s: TrackedIndexSet<u32> = tset!("on/set_iter", 16);
+        s.insert(42);
+        let _collected: Vec<u32> = s.into_iter().collect();
+    }
+    assert!(
+        peak("on/set_iter") >= 16,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tbtreeset_into_iter_records_peak_before_consume() {
+    // TrackedBTreeSet uses len() as metric (no capacity concept).
+    {
+        let mut s: TrackedBTreeSet<u32> = tbtreeset!("on/btreeset_iter", 0);
+        s.insert(1);
+        s.insert(2);
+        s.insert(3);
+        let _collected: Vec<u32> = s.into_iter().collect();
+    }
+    assert!(
+        peak("on/btreeset_iter") >= 3,
+        "peak (len) must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tvecdeque_into_iter_records_peak_before_consume() {
+    // TrackedVecDeque uses capacity() as metric.
+    {
+        let mut d: TrackedVecDeque<u32> = tvecdeque!("on/vecdeque_iter", 32);
+        d.push_back(1);
+        d.push_back(2);
+        let _collected: Vec<u32> = d.into_iter().collect();
+    }
+    assert!(
+        peak("on/vecdeque_iter") >= 32,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+// ── N5: into_inner tests for 12 non-Vec wrappers ─────────────────────────────
+
+#[test]
+fn into_inner_vecdeque_records_sample() {
+    let mut d: TrackedVecDeque<u32> = tvecdeque!("on/into_inner_vecdeque", 32);
+    d.push_back(1);
+    let raw: std::collections::VecDeque<u32> = d.into_inner();
+    assert!(raw.capacity() >= 32);
+    assert!(peak("on/into_inner_vecdeque") >= 32);
+}
+
+#[test]
+fn into_inner_btreemap_records_sample() {
+    let mut m: TrackedBTreeMap<u32, u32> = tbtreemap!("on/into_inner_btreemap", 0);
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.insert(3, 30);
+    let raw: std::collections::BTreeMap<u32, u32> = m.into_inner();
+    assert_eq!(raw.len(), 3);
+    assert!(peak("on/into_inner_btreemap") >= 3);
+}
+
+#[test]
+fn into_inner_btreeset_records_sample() {
+    let mut s: TrackedBTreeSet<u32> = tbtreeset!("on/into_inner_btreeset", 0);
+    s.insert(1);
+    s.insert(2);
+    s.insert(3);
+    s.insert(4);
+    let raw: std::collections::BTreeSet<u32> = s.into_inner();
+    assert_eq!(raw.len(), 4);
+    assert!(peak("on/into_inner_btreeset") >= 4);
+}
+
+#[test]
+fn into_inner_bytesmut_records_sample() {
+    let b: TrackedBytesMut = tbytesmut!("on/into_inner_bytesmut", 64);
+    let raw: bytes::BytesMut = b.into_inner();
+    assert!(raw.capacity() >= 64);
+    assert!(peak("on/into_inner_bytesmut") >= 64);
+}
+
+#[test]
+fn into_inner_hashmap_records_sample() {
+    // I1 regression: Default bound on S was removed — conversion works without S: Default.
+    let mut m: TrackedHashMap<u32, u32> = tfxmap!("on/into_inner_hashmap", 16);
+    m.insert(1, 10);
+    m.insert(2, 20);
+    let raw: std::collections::HashMap<u32, u32, crate::CapHasher> = m.into_inner();
+    assert!(raw.capacity() >= 16);
+    assert!(peak("on/into_inner_hashmap") >= 16);
+}
+
+#[test]
+fn into_inner_hashset_records_sample() {
+    // I1 regression: Default bound on S was removed — conversion works without S: Default.
+    let mut s: TrackedHashSet<u32> = tfxset!("on/into_inner_hashset", 16);
+    s.insert(1);
+    let raw: std::collections::HashSet<u32, crate::CapHasher> = s.into_inner();
+    assert!(raw.capacity() >= 16);
+    assert!(peak("on/into_inner_hashset") >= 16);
+}
+
+#[test]
+fn into_inner_indexmap_records_sample() {
+    // I1 regression: Default bound on S was removed.
+    let mut m: TrackedIndexMap<u32, u32> = tmap!("on/into_inner_indexmap", 8);
+    m.insert(1, 10);
+    let raw: indexmap::IndexMap<u32, u32, crate::CapHasher> = m.into_inner();
+    assert!(raw.capacity() >= 8);
+    assert!(peak("on/into_inner_indexmap") >= 8);
+}
+
+#[test]
+fn into_inner_indexset_records_sample() {
+    // I1 regression: Default bound on S was removed.
+    let mut s: TrackedIndexSet<u32> = tset!("on/into_inner_indexset", 8);
+    s.insert(42);
+    let raw: indexmap::IndexSet<u32, crate::CapHasher> = s.into_inner();
+    assert!(raw.capacity() >= 8);
+    assert!(peak("on/into_inner_indexset") >= 8);
+}
+
+#[test]
+fn into_inner_dashmap_records_sample() {
+    // I1 regression: Default bound on S was removed.
+    let m: TrackedDashMap<u32, u32> = tdashmap!("on/into_inner_dashmap", 0);
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.insert(3, 30);
+    let raw: dashmap::DashMap<u32, u32, crate::CapHasher> = m.into_inner();
+    // O(N) ack: test only — verifying the items are preserved after into_inner.
+    let len = {
+        #[allow(clippy::disallowed_methods)]
+        raw.len()
+    };
+    assert_eq!(len, 3);
+    assert!(peak("on/into_inner_dashmap") >= 3);
+}
+
+#[test]
+fn into_inner_scc_hashmap_records_sample() {
+    // I1 regression: Default bound on S was removed.
+    let m: TrackedSccHashMap<u32, u32> = tsccmap!("on/into_inner_sccmap", 0);
+    let _ = m.insert(1, 10);
+    let _ = m.insert(2, 20);
+    let _ = m.insert(3, 30);
+    let raw: scc::HashMap<u32, u32, crate::CapHasher> = m.into_inner();
+    // O(N) ack: test only.
+    let len = {
+        #[allow(clippy::disallowed_methods)]
+        raw.len()
+    };
+    assert_eq!(len, 3);
+    assert!(peak("on/into_inner_sccmap") >= 3);
+}
+
+#[test]
+fn into_inner_scc_hashset_records_sample() {
+    // I1 regression: Default bound on S was removed.
+    let s: TrackedSccHashSet<u32> = tsccset!("on/into_inner_sccset", 0);
+    let _ = s.insert(1);
+    let _ = s.insert(2);
+    let raw: scc::HashSet<u32, crate::CapHasher> = s.into_inner();
+    // O(N) ack: test only.
+    let len = {
+        #[allow(clippy::disallowed_methods)]
+        raw.len()
+    };
+    assert_eq!(len, 2);
+    assert!(peak("on/into_inner_sccset") >= 2);
+}
+
+#[test]
+fn into_inner_scc_treeindex_records_sample() {
+    let t: TrackedSccTreeIndex<u32, u32> = tscctree!("on/into_inner_scctree", 0);
+    let _ = t.insert(1, 10);
+    let _ = t.insert(2, 20);
+    let _ = t.insert(3, 30);
+    let raw: scc::TreeIndex<u32, u32> = t.into_inner();
+    // O(N) ack: test only.
+    let len = {
+        #[allow(clippy::disallowed_methods)]
+        raw.len()
+    };
+    assert_eq!(len, 3);
+    assert!(peak("on/into_inner_scctree") >= 3);
+}

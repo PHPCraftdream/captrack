@@ -820,8 +820,9 @@ macro_rules! tsccset {
 #[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tscctree {
-    ($name:literal, $_cap:expr) => {{
+    ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
+        let _ = $cap;
         {
             #[allow(clippy::disallowed_methods)]
             ::scc::TreeIndex::new()

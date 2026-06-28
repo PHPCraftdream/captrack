@@ -92,6 +92,10 @@ impl SampleStats {
     pub fn from_sorted_samples(sorted: &[usize]) -> Self {
         let count = sorted.len();
         assert!(count > 0, "from_sorted_samples requires a non-empty slice");
+        debug_assert!(
+            sorted.windows(2).all(|w| w[0] <= w[1]),
+            "from_sorted_samples requires ascending input"
+        );
         let min = sorted[0];
         let max = sorted[count - 1];
 
@@ -125,12 +129,19 @@ impl SampleStats {
 
 /// Nearest-rank percentile on a sorted slice.
 ///
-/// Definition: `ceil(p/100 * n)`-th element (1-indexed), clamped to `[1, n]`.
+/// Definition: `ceil(p * n / 100)`-th element (1-indexed), clamped to `[1, n]`.
 /// `p = 100` returns the max, `p = 0` is treated as 1 (returns min).
+///
+/// # Note
+///
+/// Percentiles are only statistically meaningful for `n ≳ 100`.  For small
+/// samples (`n < 10`) `p90`/`p95`/`p99` typically collapse to `max`.
 fn percentile(sorted: &[usize], p: u8) -> usize {
     let n = sorted.len();
     debug_assert!(n > 0);
-    let rank = ((p as f64 / 100.0) * n as f64).ceil() as usize;
+    // Integer nearest-rank: rank = ceil(p * n / 100), 1-indexed, clamped [1, n].
+    // Use u128 to avoid overflow on n × p product for very large n.
+    let rank = ((p as u128 * n as u128).div_ceil(100)) as usize;
     let idx = rank.saturating_sub(1).min(n - 1);
     sorted[idx]
 }
@@ -226,5 +237,17 @@ mod tests {
         assert_eq!(s.min, 2);
         assert_eq!(s.max, 9);
         assert_eq!(s.median, 4);
+    }
+
+    // N3: documents garbage-in → garbage-out on the fast path (release only —
+    // in debug builds from_sorted_samples panics via debug_assert).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn from_sorted_samples_with_unsorted_returns_garbage_silently() {
+        // Documents that the fast-path skips validation: unsorted input
+        // produces wrong but well-defined output (min=first, max=last).
+        let s = SampleStats::from_sorted_samples(&[5, 1, 9, 3]);
+        assert_eq!(s.min, 5); // wrong! actual min is 1 — caller's fault
+        assert_eq!(s.max, 3); // wrong! actual max is 9
     }
 }
