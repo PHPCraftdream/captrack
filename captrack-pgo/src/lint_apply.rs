@@ -473,6 +473,30 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
 // Undo support — generic over all LintRunManifest operations
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Read and parse a `LintRunManifest` from `path`.
+///
+/// Returns helpful errors:
+/// - `Err` with "no manifest found" context when the file does not exist.
+/// - `Err` with serde context when the JSON is malformed.
+///
+/// Used by `uninstrument` (and any future subcommand) that needs to inspect
+/// the manifest before deciding whether to proceed.
+pub fn read_manifest(path: &Path) -> Result<LintRunManifest> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow!(
+                    "no manifest found at {}; nothing to uninstrument",
+                    path.display()
+                )
+            } else {
+                anyhow!("read manifest {}: {e}", path.display())
+            }
+        })?;
+    serde_json::from_str::<LintRunManifest>(&raw)
+        .with_context(|| format!("parse manifest {}", path.display()))
+}
+
 /// Revert the changes recorded in a `LintRunManifest`.
 /// Returns the number of files restored.
 pub fn undo_lint_apply(manifest_path: &Path) -> Result<usize> {

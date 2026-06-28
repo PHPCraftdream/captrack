@@ -1,11 +1,13 @@
 //! CLI definitions for captrack-pgo.
 //!
 //! Subcommands:
-//!   measure      — placeholder for a future "run bench under profiler" helper.
-//!   apply        — Dylint-based capacity rewrite via `cargo dylint --fix`.
-//!   instrument   — Dylint-based auto-wrap via `cargo dylint --fix` +
-//!                  `CAPTRACK_PGO_INSTRUMENT=1`.
-//!   undo         — revert the most recent `apply` or `instrument` manifest.
+//!   measure        — placeholder for a future "run bench under profiler" helper.
+//!   apply          — Dylint-based capacity rewrite via `cargo dylint --fix`.
+//!   instrument     — Dylint-based auto-wrap via `cargo dylint --fix` +
+//!                    `CAPTRACK_PGO_INSTRUMENT=1`.
+//!   undo           — revert the most recent `apply` or `instrument` manifest.
+//!   uninstrument   — revert the most recent `instrument` manifest (strict;
+//!                    rejects `apply` manifests).
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
@@ -103,6 +105,27 @@ pub enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+
+    /// Roll back an `instrument` run using its manifest (strict variant).
+    ///
+    /// Unlike `undo`, this subcommand ONLY accepts manifests produced by the
+    /// `instrument` subcommand (`operation.op == "instrument"`).  If the
+    /// manifest was written by `apply`, it exits with an error pointing the
+    /// user to `captrack-pgo undo`.
+    ///
+    /// Without `--manifest`, uses the conventional instrument manifest path
+    /// `target/captrack-pgo/last-instrument.json` (never falls back to
+    /// `last-apply.json`).
+    Uninstrument {
+        /// Workspace root (defaults to current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Explicit manifest path (defaults to
+        /// `<workspace>/target/captrack-pgo/last-instrument.json`).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
 }
 
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -129,6 +152,9 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Undo { manifest } => {
             run_undo(manifest)?;
+        }
+        Command::Uninstrument { workspace, manifest } => {
+            run_uninstrument(workspace, manifest)?;
         }
     }
     Ok(())
@@ -221,6 +247,60 @@ fn run_undo(manifest: Option<PathBuf>) -> anyhow::Result<()> {
         "reverted {n} file{} from {}",
         if n == 1 { "" } else { "s" },
         path.display()
+    );
+
+    Ok(())
+}
+
+fn run_uninstrument(
+    workspace: Option<PathBuf>,
+    manifest: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use crate::lint_apply::Operation;
+    use crate::workspace as ws;
+
+    // 1. Resolve workspace root (needed only when --manifest is omitted).
+    let manifest_path = match manifest {
+        Some(p) => p,
+        None => {
+            let workspace_start =
+                workspace.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let workspace_root =
+                ws::find_workspace_root(&workspace_start).with_context(|| {
+                    format!(
+                        "locate workspace root from {}",
+                        workspace_start.display()
+                    )
+                })?;
+            lint_apply::default_instrument_manifest_path(&workspace_root)
+        }
+    };
+
+    // 2. Read + parse the manifest; surface helpful errors.
+    let manifest = lint_apply::read_manifest(&manifest_path)?;
+
+    // 3. Validate the operation type.
+    match &manifest.operation {
+        Operation::Instrument => {
+            // Correct type — proceed.
+        }
+        Operation::Apply { .. } => {
+            return Err(anyhow::anyhow!(
+                "manifest at {} is from `apply` (capacity rewrite), not `instrument`. \
+                 Use `captrack-pgo undo` to revert it.",
+                manifest_path.display()
+            ));
+        }
+    }
+
+    // 4. Delegate to the generic revert (re-reads + verifies the manifest).
+    let n = lint_apply::undo_lint_apply(&manifest_path)?;
+
+    // 5. Summary (manifest file is intentionally left in place).
+    println!(
+        "uninstrument: reverted {n} file{} from {}",
+        if n == 1 { "" } else { "s" },
+        manifest_path.display()
     );
 
     Ok(())
