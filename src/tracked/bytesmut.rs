@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `BytesMut` wrapper that records creation count and peak capacity.
 pub struct TrackedBytesMut {
@@ -51,15 +52,24 @@ impl Drop for TrackedBytesMut {
 }
 
 impl From<TrackedBytesMut> for BytesMut {
-    fn from(mut tracked: TrackedBytesMut) -> BytesMut {
+    fn from(tracked: TrackedBytesMut) -> BytesMut {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::take(&mut tracked.inner);
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl IntoInner for TrackedBytesMut {
+    type Inner = BytesMut;
+    #[inline]
+    fn into_inner(self) -> BytesMut {
+        BytesMut::from(self)
     }
 }

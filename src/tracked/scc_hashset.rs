@@ -1,6 +1,7 @@
 use std::hash::{BuildHasher, Hash};
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `scc::HashSet<T, S>` wrapper that records creation count and peak
 /// occupancy.
@@ -84,20 +85,24 @@ impl<T: Eq + Hash + 'static, S: BuildHasher> Drop for TrackedSccHashSet<T, S> {
     }
 }
 
-// `From` requires `S: Default` to construct a temporary empty set for
-// `mem::replace`.  scc::HashSet metrics use `len()` (same as Drop).
-impl<T: Eq + Hash + 'static, S: BuildHasher + Default> From<TrackedSccHashSet<T, S>>
-    for scc::HashSet<T, S>
-{
-    fn from(mut tracked: TrackedSccHashSet<T, S>) -> scc::HashSet<T, S> {
+// `Default` is no longer needed — ptr::read replaces mem::replace.
+impl<T: Eq + Hash + 'static, S: BuildHasher> From<TrackedSccHashSet<T, S>> for scc::HashSet<T, S> {
+    fn from(tracked: TrackedSccHashSet<T, S>) -> scc::HashSet<T, S> {
         #[allow(clippy::disallowed_methods)]
         let peak = tracked.inner.len();
         registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
-        let inner = std::mem::replace(
-            &mut tracked.inner,
-            scc::HashSet::with_capacity_and_hasher(0, S::default()),
-        );
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring `Default` on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<T: Eq + Hash + 'static, S: BuildHasher> IntoInner for TrackedSccHashSet<T, S> {
+    type Inner = scc::HashSet<T, S>;
+    #[inline]
+    fn into_inner(self) -> scc::HashSet<T, S> {
+        scc::HashSet::from(self)
     }
 }

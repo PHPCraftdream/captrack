@@ -124,56 +124,177 @@ pub use tracked::{
 pub use aliases::*;
 
 // ---------------------------------------------------------------------------
-// `untrack!` — boundary conversion without clippy::useless_conversion
+// `IntoInner` — boundary conversion with deterministic type inference
 //
-// Off-feature: identity (`$e` as-is) — the value is already a bare type.
-//              No `.into()`, no clippy warning.
-// On-feature:  `From::from($e)` — uses the `From<TrackedX> for StdX` impls
-//              that record the final capacity sample before unwrapping.
+// Unlike a free `.into()`, the associated `Inner` type is pinned by the
+// source type, so call-chains like `tvec!("foo", 16).into_inner().len()`
+// infer correctly in BOTH feature modes.
 //
-// Usage:
-//
-//   fn build() -> Vec<u32> {
-//       let mut v = tvec!("my/rows", 64);
-//       v.push(1u32);
-//       untrack!(v)   // compiles & correct in BOTH feature modes
-//   }
+// Off-feature: `TrackedX<T>` IS `StdX<T>` via type alias; the identity impl
+//              is `#[inline(always)]` and zero-cost.
+// On-feature:  the wrapper impl records the final capacity sample then
+//              delegates to `From::from(self)`.
 // ---------------------------------------------------------------------------
 
-/// Convert a `t*!`-produced value into the corresponding bare standard type
-/// at an API boundary.
+/// Convert a captrack wrapper (or already-bare collection) into the inner
+/// std/third-party type.  Works symmetrically in both feature modes:
 ///
-/// * **Off-feature** — identity: the value is already a bare type.  No
-///   allocation, no copy, no clippy `useless_conversion` warning.
-/// * **On-feature** — calls `From::from` which uses the `From<TrackedX> for
-///   StdX` impl: records the final capacity sample in the registry, then
-///   unwraps the inner collection.
+/// * **Off-feature** — `TrackedX<T>` IS `StdX<T>` via type alias, the impl
+///   is the identity move (`#[inline(always)]`, zero-cost).
+/// * **On-feature** — `TrackedX<T>` is the wrapper struct, the impl records
+///   the final capacity sample and unwraps the inner collection.
+///
+/// Used at API boundaries where a function's return type is `StdX<T>` but
+/// construction goes through a captrack macro.  Unlike a free `.into()`,
+/// the associated `Inner` type is pinned by the source type, so call-chains
+/// like `tvec!("foo", 16).into_inner().len()` infer correctly in BOTH modes.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use captrack::{tvec, untrack};
+/// use captrack::{tvec, IntoInner};
 ///
 /// fn build() -> Vec<u32> {
 ///     let mut v = tvec!("my/rows", 64);
 ///     v.push(1u32);
-///     untrack!(v) // identical source in both feature modes
+///     v.into_inner() // identical source in both feature modes
 /// }
 /// ```
-#[cfg(not(feature = "telemetry"))]
-#[macro_export]
-macro_rules! untrack {
-    ($e:expr) => {
-        $e
-    };
+pub trait IntoInner: Sized {
+    type Inner;
+    fn into_inner(self) -> Self::Inner;
 }
 
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! untrack {
-    ($e:expr) => {
-        ::core::convert::From::from($e)
-    };
+// ── Identity impls for always-available std types ──────────────────────────
+
+impl<T> IntoInner for std::vec::Vec<T> {
+    type Inner = std::vec::Vec<T>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<T> IntoInner for std::collections::VecDeque<T> {
+    type Inner = std::collections::VecDeque<T>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<K: std::cmp::Ord, V> IntoInner for std::collections::BTreeMap<K, V> {
+    type Inner = std::collections::BTreeMap<K, V>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<T: std::cmp::Ord> IntoInner for std::collections::BTreeSet<T> {
+    type Inner = std::collections::BTreeSet<T>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<K, V, S> IntoInner for std::collections::HashMap<K, V, S> {
+    type Inner = std::collections::HashMap<K, V, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<T, S> IntoInner for std::collections::HashSet<T, S> {
+    type Inner = std::collections::HashSet<T, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+// ── Identity impls for optional bare types (mirror the alias feature gates) ─
+
+#[cfg(any(feature = "bytes", feature = "telemetry"))]
+impl IntoInner for ::bytes::BytesMut {
+    type Inner = ::bytes::BytesMut;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "indexmap", feature = "telemetry"))]
+impl<K, V, S> IntoInner for ::indexmap::IndexMap<K, V, S> {
+    type Inner = ::indexmap::IndexMap<K, V, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "indexmap", feature = "telemetry"))]
+impl<T, S> IntoInner for ::indexmap::IndexSet<T, S> {
+    type Inner = ::indexmap::IndexSet<T, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "dashmap", feature = "telemetry"))]
+impl<K, V, S> IntoInner for ::dashmap::DashMap<K, V, S>
+where
+    K: Eq + std::hash::Hash,
+    S: std::hash::BuildHasher + Clone,
+{
+    type Inner = ::dashmap::DashMap<K, V, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "scc", feature = "telemetry"))]
+impl<K, V, S> IntoInner for ::scc::HashMap<K, V, S>
+where
+    K: Eq + std::hash::Hash + 'static,
+    V: 'static,
+    S: std::hash::BuildHasher,
+{
+    type Inner = ::scc::HashMap<K, V, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "scc", feature = "telemetry"))]
+impl<T, S> IntoInner for ::scc::HashSet<T, S>
+where
+    T: Eq + std::hash::Hash + 'static,
+    S: std::hash::BuildHasher,
+{
+    type Inner = ::scc::HashSet<T, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "scc", feature = "telemetry"))]
+impl<K, V> IntoInner for ::scc::TreeIndex<K, V>
+where
+    K: Clone + Ord + 'static,
+    V: Clone + 'static,
+{
+    type Inner = ::scc::TreeIndex<K, V>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------

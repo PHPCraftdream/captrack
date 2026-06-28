@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `BTreeMap<K, V>` wrapper that records creation count and peak occupancy.
 ///
@@ -58,16 +59,26 @@ impl<K: Ord, V> Drop for TrackedBTreeMap<K, V> {
 }
 
 impl<K: Ord, V> From<TrackedBTreeMap<K, V>> for BTreeMap<K, V> {
-    fn from(mut tracked: TrackedBTreeMap<K, V>) -> BTreeMap<K, V> {
+    fn from(tracked: TrackedBTreeMap<K, V>) -> BTreeMap<K, V> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.len(),
         );
-        let inner = std::mem::take(&mut tracked.inner);
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` (BTreeMap has no capacity, no Default needed).
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<K: Ord, V> IntoInner for TrackedBTreeMap<K, V> {
+    type Inner = BTreeMap<K, V>;
+    #[inline]
+    fn into_inner(self) -> BTreeMap<K, V> {
+        BTreeMap::from(self)
     }
 }
 
@@ -75,9 +86,10 @@ impl<K: Ord, V> IntoIterator for TrackedBTreeMap<K, V> {
     type Item = (K, V);
     type IntoIter = std::collections::btree_map::IntoIter<K, V>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.len());
-        let inner = std::mem::take(&mut self.inner);
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

@@ -10,7 +10,7 @@ use std::thread;
 
 use crate::registry;
 use crate::{
-    TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
+    IntoInner, TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
     TrackedHashSet, TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet,
     TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
 };
@@ -379,23 +379,47 @@ fn tfxmap_into_iter_records_peak_before_consume() {
 }
 
 #[test]
-fn untrack_records_sample_on_conversion() {
-    let before = count("on/untrack");
+fn into_inner_records_sample_on_conversion() {
+    let before = count("on/into_inner");
     {
-        let mut v: TrackedVec<u32> = tvec!("on/untrack", 64);
+        let mut v: TrackedVec<u32> = tvec!("on/into_inner", 64);
         v.push(1);
-        let raw: Vec<u32> = untrack!(v);
+        let raw: Vec<u32> = v.into_inner();
         // raw is now a bare Vec — Drop runs on it, not on TrackedVec.
         assert_eq!(raw.len(), 1);
         assert!(raw.capacity() >= 64);
     }
-    // Sample should be recorded by From<TrackedVec> for Vec (called via untrack!).
+    // Sample should be recorded by From<TrackedVec> for Vec (called via into_inner).
     // Without the explicit record_sample in From, peak would be 0.
     assert!(
-        peak("on/untrack") >= 64,
-        "untrack!() must record capacity sample before unwrapping inner"
+        peak("on/into_inner") >= 64,
+        "into_inner() must record capacity sample before unwrapping inner"
     );
-    assert_eq!(count("on/untrack") - before, 1);
+    assert_eq!(count("on/into_inner") - before, 1);
+}
+
+#[test]
+fn into_inner_supports_chained_method_inference() {
+    // The C1 regression case — chain on a TrackedVec with NO post-conversion
+    // type anchor.  `untrack!(v).len()` would fail on-feature with E0282
+    // because `From::from` left the target type unconstrained.  `IntoInner`
+    // has an associated `Inner` pinned by the source type, so `.len()` and
+    // `.capacity()` resolve deterministically in both feature modes.
+    let mut v = tvec!("on/chained", 8);
+    v.push(1u32);
+    let len = v.into_inner().len();
+    assert_eq!(len, 1);
+
+    let mut v2 = tvec!("on/chained2", 4);
+    v2.push(7u32);
+    let raw = v2.into_inner();
+    assert_eq!(raw.capacity(), 4); // resolves only if raw: Vec<u32>
+    let _: Vec<u32> = raw;
+
+    // After both into_inner() conversions, samples were recorded for both
+    // call-sites (capacity >= initial).
+    assert!(peak("on/chained") >= 8);
+    assert!(peak("on/chained2") >= 4);
 }
 
 #[test]

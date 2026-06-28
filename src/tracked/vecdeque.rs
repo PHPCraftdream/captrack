@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `VecDeque<T>` wrapper that records creation count and peak capacity.
 pub struct TrackedVecDeque<T> {
@@ -51,16 +52,26 @@ impl<T> Drop for TrackedVecDeque<T> {
 }
 
 impl<T> From<TrackedVecDeque<T>> for VecDeque<T> {
-    fn from(mut tracked: TrackedVecDeque<T>) -> VecDeque<T> {
+    fn from(tracked: TrackedVecDeque<T>) -> VecDeque<T> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::take(&mut tracked.inner);
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring Default.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<T> IntoInner for TrackedVecDeque<T> {
+    type Inner = VecDeque<T>;
+    #[inline]
+    fn into_inner(self) -> VecDeque<T> {
+        VecDeque::from(self)
     }
 }
 
@@ -68,9 +79,10 @@ impl<T> IntoIterator for TrackedVecDeque<T> {
     type Item = T;
     type IntoIter = std::collections::vec_deque::IntoIter<T>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::take(&mut self.inner);
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

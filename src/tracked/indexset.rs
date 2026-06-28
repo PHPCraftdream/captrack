@@ -3,6 +3,7 @@ use std::hash::{BuildHasher, Hash};
 use indexmap::IndexSet;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `IndexSet<T, S>` wrapper — insertion-ordered set with telemetry.
 ///
@@ -76,27 +77,38 @@ impl<T, S> Drop for TrackedIndexSet<T, S> {
     }
 }
 
-impl<T: Eq + Hash, S: BuildHasher + Default> From<TrackedIndexSet<T, S>> for IndexSet<T, S> {
-    fn from(mut tracked: TrackedIndexSet<T, S>) -> IndexSet<T, S> {
+impl<T, S> From<TrackedIndexSet<T, S>> for IndexSet<T, S> {
+    fn from(tracked: TrackedIndexSet<T, S>) -> IndexSet<T, S> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::replace(&mut tracked.inner, IndexSet::with_hasher(S::default()));
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring `Default` on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
     }
 }
 
-impl<T: Eq + Hash, S: BuildHasher + Default> IntoIterator for TrackedIndexSet<T, S> {
+impl<T, S> IntoInner for TrackedIndexSet<T, S> {
+    type Inner = IndexSet<T, S>;
+    #[inline]
+    fn into_inner(self) -> IndexSet<T, S> {
+        IndexSet::from(self)
+    }
+}
+
+impl<T: Eq + Hash, S: BuildHasher> IntoIterator for TrackedIndexSet<T, S> {
     type Item = T;
     type IntoIter = indexmap::set::IntoIter<T>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::replace(&mut self.inner, IndexSet::with_hasher(S::default()));
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

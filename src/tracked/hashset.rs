@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::hash::{BuildHasher, Hash};
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `HashSet<T, S>` wrapper that records creation count and peak capacity.
 ///
@@ -79,27 +80,38 @@ impl<T, S> Drop for TrackedHashSet<T, S> {
     }
 }
 
-impl<T: Eq + Hash, S: BuildHasher + Default> From<TrackedHashSet<T, S>> for HashSet<T, S> {
-    fn from(mut tracked: TrackedHashSet<T, S>) -> HashSet<T, S> {
+impl<T, S> From<TrackedHashSet<T, S>> for HashSet<T, S> {
+    fn from(tracked: TrackedHashSet<T, S>) -> HashSet<T, S> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::replace(&mut tracked.inner, HashSet::with_hasher(S::default()));
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring `Default` on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
     }
 }
 
-impl<T: Eq + Hash, S: BuildHasher + Default> IntoIterator for TrackedHashSet<T, S> {
+impl<T, S> IntoInner for TrackedHashSet<T, S> {
+    type Inner = HashSet<T, S>;
+    #[inline]
+    fn into_inner(self) -> HashSet<T, S> {
+        HashSet::from(self)
+    }
+}
+
+impl<T: Eq + Hash, S: BuildHasher> IntoIterator for TrackedHashSet<T, S> {
     type Item = T;
     type IntoIter = std::collections::hash_set::IntoIter<T>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::replace(&mut self.inner, HashSet::with_hasher(S::default()));
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

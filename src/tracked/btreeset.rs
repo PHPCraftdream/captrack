@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `BTreeSet<T>` wrapper that records creation count and peak occupancy.
 ///
@@ -54,16 +55,25 @@ impl<T: Ord> Drop for TrackedBTreeSet<T> {
 }
 
 impl<T: Ord> From<TrackedBTreeSet<T>> for BTreeSet<T> {
-    fn from(mut tracked: TrackedBTreeSet<T>) -> BTreeSet<T> {
+    fn from(tracked: TrackedBTreeSet<T>) -> BTreeSet<T> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.len(),
         );
-        let inner = std::mem::take(&mut tracked.inner);
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<T: Ord> IntoInner for TrackedBTreeSet<T> {
+    type Inner = BTreeSet<T>;
+    #[inline]
+    fn into_inner(self) -> BTreeSet<T> {
+        BTreeSet::from(self)
     }
 }
 
@@ -71,9 +81,10 @@ impl<T: Ord> IntoIterator for TrackedBTreeSet<T> {
     type Item = T;
     type IntoIter = std::collections::btree_set::IntoIter<T>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.len());
-        let inner = std::mem::take(&mut self.inner);
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

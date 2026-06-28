@@ -1,4 +1,5 @@
 use crate::registry;
+use crate::IntoInner;
 
 /// A `Vec<T>` wrapper that records creation count and capacity samples in the
 /// global capacity-telemetry registry.
@@ -57,20 +58,29 @@ impl<T> Drop for TrackedVec<T> {
 
 // Cross-feature boundary bridge: converting `TrackedVec<T>` to bare `Vec<T>` at
 // API boundaries.  Records the final capacity sample (same as Drop would) and
-// then unwraps `inner`.  Pattern mirrors `IntoIterator::into_iter` below:
-// `record_sample` BEFORE `mem::take`, then `mem::forget(self)` so Drop doesn't
-// run again and record `capacity() == 0`.
+// then unwraps `inner`.
 impl<T> From<TrackedVec<T>> for Vec<T> {
-    fn from(mut tracked: TrackedVec<T>) -> Vec<T> {
+    fn from(tracked: TrackedVec<T>) -> Vec<T> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::take(&mut tracked.inner);
+        // SAFETY: `tracked` is owned by us and will be forgotten on the next
+        // line, so its Drop never runs.  `ptr::read` bit-copies `inner` out;
+        // ownership moves to the returned value.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<T> IntoInner for TrackedVec<T> {
+    type Inner = Vec<T>;
+    #[inline]
+    fn into_inner(self) -> Vec<T> {
+        Vec::from(self)
     }
 }
 
@@ -78,15 +88,17 @@ impl<T> IntoIterator for TrackedVec<T> {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         // Record sample before consuming `inner`.  We must do this explicitly
-        // here because `into_iter` moves out of `self.inner` via
-        // `std::mem::take`, leaving behind an empty `Vec` — if we let `Drop`
+        // here because `into_iter` moves out of `self.inner` — if we let `Drop`
         // run afterwards it would see `capacity() == 0` and record a false
         // zero.  `std::mem::forget(self)` prevents the Drop from running a
         // second time.
+        //
+        // SAFETY: `self` is owned by us and will be forgotten on the next
+        // line, so its Drop never runs.  `ptr::read` bit-copies `inner` out.
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::take(&mut self.inner);
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

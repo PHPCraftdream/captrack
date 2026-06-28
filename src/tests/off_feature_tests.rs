@@ -8,7 +8,7 @@
 #[allow(unused_imports)]
 use crate::{
     tbtreemap, tbtreeset, tbytesmut, tdashmap, tfxmap, tfxset, tmap, tsccmap, tsccset, tscctree,
-    tset, tvec, tvecdeque,
+    tset, tvec, tvecdeque, IntoInner,
 };
 
 #[test]
@@ -168,13 +168,34 @@ fn dump_is_noop_in_off_feature() {
 }
 
 #[test]
-fn untrack_identity_in_off_feature() {
-    let mut v = tvec!("test/untrack", 8);
+fn into_inner_identity_in_off_feature() {
+    let mut v = tvec!("test/into_inner", 8);
     v.push(1u32);
     v.push(2u32);
-    let raw: Vec<u32> = untrack!(v);
+    let raw: Vec<u32> = v.into_inner();
     assert_eq!(raw.len(), 2);
     assert!(raw.capacity() >= 8);
+}
+
+#[test]
+fn into_inner_supports_chained_method_inference() {
+    // The C1 regression case — chain on a TrackedVec with NO post-conversion
+    // type anchor.  `untrack!(v).len()` would fail on-feature with E0282
+    // because `From::from` left the target type unconstrained.  `IntoInner`
+    // has an associated `Inner` pinned by the source type, so `.len()` and
+    // `.capacity()` resolve deterministically in both feature modes.
+    let mut v = tvec!("test/chained", 8);
+    v.push(1u32); // anchors T = u32
+    let len = v.into_inner().len();
+    assert_eq!(len, 1);
+
+    // No type annotation on the receiving binding either — inferred purely
+    // from `IntoInner::Inner = Vec<u32>` via the post-conversion `.capacity()`.
+    let mut v2 = tvec!("test/chained2", 4);
+    v2.push(7u32);
+    let raw = v2.into_inner();
+    assert_eq!(raw.capacity(), 4); // Vec::capacity resolves only if raw: Vec<u32>
+    let _: Vec<u32> = raw; // post-hoc proof: inferred type IS Vec<u32>
 }
 
 /// Verify that CapHasher is RandomState when no hasher feature is active.

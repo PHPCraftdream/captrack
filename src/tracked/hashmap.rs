@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `HashMap<K, V, S>` wrapper that records creation count and peak capacity.
 ///
@@ -83,27 +84,40 @@ impl<K, V, S> Drop for TrackedHashMap<K, V, S> {
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher + Default> From<TrackedHashMap<K, V, S>> for HashMap<K, V, S> {
-    fn from(mut tracked: TrackedHashMap<K, V, S>) -> HashMap<K, V, S> {
+impl<K, V, S> From<TrackedHashMap<K, V, S>> for HashMap<K, V, S> {
+    fn from(tracked: TrackedHashMap<K, V, S>) -> HashMap<K, V, S> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::replace(&mut tracked.inner, HashMap::with_hasher(S::default()));
+        // SAFETY: `tracked` is owned by us and will be forgotten on the next
+        // line, so its Drop never runs.  `ptr::read` bit-copies `inner` out;
+        // ownership moves to the returned value.  Equivalent to
+        // `mem::replace` but requires no `Default` bound on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher + Default> IntoIterator for TrackedHashMap<K, V, S> {
+impl<K, V, S> IntoInner for TrackedHashMap<K, V, S> {
+    type Inner = HashMap<K, V, S>;
+    #[inline]
+    fn into_inner(self) -> HashMap<K, V, S> {
+        HashMap::from(self)
+    }
+}
+
+impl<K: Eq + Hash, V, S: BuildHasher> IntoIterator for TrackedHashMap<K, V, S> {
     type Item = (K, V);
     type IntoIter = std::collections::hash_map::IntoIter<K, V>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::replace(&mut self.inner, HashMap::with_hasher(S::default()));
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }

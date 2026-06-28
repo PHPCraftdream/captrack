@@ -3,6 +3,7 @@ use std::hash::{BuildHasher, Hash};
 use dashmap::DashMap;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `DashMap<K, V, S>` wrapper that records creation count and peak occupancy.
 ///
@@ -91,20 +92,25 @@ impl<K: Eq + Hash, V, S: BuildHasher + Clone> Drop for TrackedDashMap<K, V, S> {
     }
 }
 
-// `From` requires `S: Default` to construct a temporary empty `DashMap` for
-// `mem::replace`.  DashMap's metrics use `len()` (same as Drop).
-impl<K: Eq + Hash, V, S: BuildHasher + Clone + Default> From<TrackedDashMap<K, V, S>>
-    for DashMap<K, V, S>
-{
-    fn from(mut tracked: TrackedDashMap<K, V, S>) -> DashMap<K, V, S> {
+// `S: Clone` is required by `DashMap`'s own struct definition (not our
+// constraint). `Default` is no longer needed — ptr::read replaces mem::replace.
+impl<K: Eq + Hash, V, S: BuildHasher + Clone> From<TrackedDashMap<K, V, S>> for DashMap<K, V, S> {
+    fn from(tracked: TrackedDashMap<K, V, S>) -> DashMap<K, V, S> {
         #[allow(clippy::disallowed_methods)]
         let peak = tracked.inner.len();
         registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
-        let inner = std::mem::replace(
-            &mut tracked.inner,
-            DashMap::with_capacity_and_hasher(0, S::default()),
-        );
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring `Default` on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<K: Eq + Hash, V, S: BuildHasher + Clone> IntoInner for TrackedDashMap<K, V, S> {
+    type Inner = DashMap<K, V, S>;
+    #[inline]
+    fn into_inner(self) -> DashMap<K, V, S> {
+        DashMap::from(self)
     }
 }

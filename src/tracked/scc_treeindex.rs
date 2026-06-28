@@ -1,4 +1,5 @@
 use crate::registry;
+use crate::IntoInner;
 
 /// A `scc::TreeIndex<K, V>` wrapper that records creation count and peak
 /// occupancy.
@@ -65,12 +66,21 @@ impl<K: Clone + Ord + 'static, V: Clone + 'static> Drop for TrackedSccTreeIndex<
 impl<K: Clone + Ord + 'static, V: Clone + 'static> From<TrackedSccTreeIndex<K, V>>
     for scc::TreeIndex<K, V>
 {
-    fn from(mut tracked: TrackedSccTreeIndex<K, V>) -> scc::TreeIndex<K, V> {
+    fn from(tracked: TrackedSccTreeIndex<K, V>) -> scc::TreeIndex<K, V> {
         #[allow(clippy::disallowed_methods)]
         let peak = tracked.inner.len();
         registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
-        let inner = std::mem::replace(&mut tracked.inner, scc::TreeIndex::new());
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
+    }
+}
+
+impl<K: Clone + Ord + 'static, V: Clone + 'static> IntoInner for TrackedSccTreeIndex<K, V> {
+    type Inner = scc::TreeIndex<K, V>;
+    #[inline]
+    fn into_inner(self) -> scc::TreeIndex<K, V> {
+        scc::TreeIndex::from(self)
     }
 }

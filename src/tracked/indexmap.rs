@@ -3,6 +3,7 @@ use std::hash::{BuildHasher, Hash};
 use indexmap::IndexMap;
 
 use crate::registry;
+use crate::IntoInner;
 
 /// A `IndexMap<K, V, S>` wrapper — insertion-ordered map with telemetry.
 ///
@@ -76,29 +77,38 @@ impl<K, V, S> Drop for TrackedIndexMap<K, V, S> {
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher + Default> From<TrackedIndexMap<K, V, S>>
-    for IndexMap<K, V, S>
-{
-    fn from(mut tracked: TrackedIndexMap<K, V, S>) -> IndexMap<K, V, S> {
+impl<K, V, S> From<TrackedIndexMap<K, V, S>> for IndexMap<K, V, S> {
+    fn from(tracked: TrackedIndexMap<K, V, S>) -> IndexMap<K, V, S> {
         registry::record_sample(
             tracked.file,
             tracked.line,
             tracked.column,
             tracked.inner.capacity(),
         );
-        let inner = std::mem::replace(&mut tracked.inner, IndexMap::with_hasher(S::default()));
+        // SAFETY: `tracked` is owned and forgotten below; ptr::read bit-copies
+        // `inner` without requiring `Default` on S.
+        let inner = unsafe { std::ptr::read(&tracked.inner) };
         std::mem::forget(tracked);
         inner
     }
 }
 
-impl<K: Eq + Hash, V, S: BuildHasher + Default> IntoIterator for TrackedIndexMap<K, V, S> {
+impl<K, V, S> IntoInner for TrackedIndexMap<K, V, S> {
+    type Inner = IndexMap<K, V, S>;
+    #[inline]
+    fn into_inner(self) -> IndexMap<K, V, S> {
+        IndexMap::from(self)
+    }
+}
+
+impl<K: Eq + Hash, V, S: BuildHasher> IntoIterator for TrackedIndexMap<K, V, S> {
     type Item = (K, V);
     type IntoIter = indexmap::map::IntoIter<K, V>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
-        let inner = std::mem::replace(&mut self.inner, IndexMap::with_hasher(S::default()));
+        // SAFETY: `self` is owned and forgotten below; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
         std::mem::forget(self);
         inner.into_iter()
     }
