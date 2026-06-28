@@ -9,7 +9,11 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 use crate::registry;
-use crate::TrackedVec;
+use crate::{
+    TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
+    TrackedHashSet, TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet,
+    TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
+};
 
 // Helper: read the registry stats for a given name.
 fn peak(name: &'static str) -> usize {
@@ -146,5 +150,219 @@ fn dump_writes_valid_json() {
     assert!(
         our_entry["creation_count"].as_u64().unwrap_or(0) >= 1,
         "creation_count for on/dump must be >= 1"
+    );
+}
+
+// ── Задача 1: тесты для оставшихся 12 wrapper'ов ─────────────────────────────
+
+#[test]
+fn tvecdeque_records_peak_and_count() {
+    let before = count("on/vecdeque_pc");
+    {
+        let mut v: TrackedVecDeque<u32> = tvecdeque!("on/vecdeque_pc", 16);
+        v.push_back(1u32);
+    }
+    assert!(peak("on/vecdeque_pc") >= 16);
+    assert_eq!(count("on/vecdeque_pc") - before, 1);
+}
+
+#[test]
+fn tbtreemap_records_peak_and_count() {
+    // BTreeMap: Drop records len(), so insert N items and check peak >= N.
+    let before = count("on/btreemap_pc");
+    {
+        let mut m: TrackedBTreeMap<u32, u32> = tbtreemap!("on/btreemap_pc", 0);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        m.insert(3, 30);
+    }
+    assert!(peak("on/btreemap_pc") >= 3);
+    assert_eq!(count("on/btreemap_pc") - before, 1);
+}
+
+#[test]
+fn tbtreeset_records_peak_and_count() {
+    let before = count("on/btreeset_pc");
+    {
+        let mut s: TrackedBTreeSet<u32> = tbtreeset!("on/btreeset_pc", 0);
+        s.insert(1);
+        s.insert(2);
+        s.insert(3);
+        s.insert(4);
+    }
+    assert!(peak("on/btreeset_pc") >= 4);
+    assert_eq!(count("on/btreeset_pc") - before, 1);
+}
+
+#[test]
+fn tbytesmut_records_peak_and_count() {
+    let before = count("on/bytesmut_pc");
+    {
+        let _b: TrackedBytesMut = tbytesmut!("on/bytesmut_pc", 64);
+    }
+    assert!(peak("on/bytesmut_pc") >= 64);
+    assert_eq!(count("on/bytesmut_pc") - before, 1);
+}
+
+#[test]
+fn tmap_records_peak_and_count() {
+    let before = count("on/map_pc");
+    {
+        let mut m: TrackedIndexMap<u32, u32> = tmap!("on/map_pc", 8);
+        m.insert(1, 2);
+    }
+    assert!(peak("on/map_pc") >= 8);
+    assert_eq!(count("on/map_pc") - before, 1);
+}
+
+#[test]
+fn tset_records_peak_and_count() {
+    let before = count("on/set_pc");
+    {
+        let mut s: TrackedIndexSet<u32> = tset!("on/set_pc", 8);
+        s.insert(42);
+    }
+    assert!(peak("on/set_pc") >= 8);
+    assert_eq!(count("on/set_pc") - before, 1);
+}
+
+#[test]
+fn tfxmap_records_peak_and_count() {
+    let before = count("on/fxmap_pc");
+    {
+        let mut m: TrackedHashMap<u32, u32> = tfxmap!("on/fxmap_pc", 16);
+        m.insert(1, 2);
+    }
+    assert!(peak("on/fxmap_pc") >= 16);
+    assert_eq!(count("on/fxmap_pc") - before, 1);
+}
+
+#[test]
+fn tfxset_records_peak_and_count() {
+    let before = count("on/fxset_pc");
+    {
+        let mut s: TrackedHashSet<u32> = tfxset!("on/fxset_pc", 16);
+        s.insert(1);
+    }
+    assert!(peak("on/fxset_pc") >= 16);
+    assert_eq!(count("on/fxset_pc") - before, 1);
+}
+
+#[test]
+fn tdashmap_records_peak_and_count() {
+    // DashMap: Drop records len(), so insert N items and check peak >= N.
+    let before = count("on/dashmap_pc");
+    {
+        let m: TrackedDashMap<u32, u32> = tdashmap!("on/dashmap_pc", 0);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        m.insert(3, 30);
+    }
+    assert!(peak("on/dashmap_pc") >= 3);
+    assert_eq!(count("on/dashmap_pc") - before, 1);
+}
+
+#[test]
+fn tsccmap_records_peak_and_count() {
+    // scc::HashMap: Drop records len(), so insert N items and check peak >= N.
+    let before = count("on/sccmap_pc");
+    {
+        let m: TrackedSccHashMap<u32, u32> = tsccmap!("on/sccmap_pc", 0);
+        let _ = m.insert(1, 10);
+        let _ = m.insert(2, 20);
+        let _ = m.insert(3, 30);
+    }
+    assert!(peak("on/sccmap_pc") >= 3);
+    assert_eq!(count("on/sccmap_pc") - before, 1);
+}
+
+#[test]
+fn tsccset_records_peak_and_count() {
+    // scc::HashSet: Drop records len(), so insert N items and check peak >= N.
+    let before = count("on/sccset_pc");
+    {
+        let s: TrackedSccHashSet<u32> = tsccset!("on/sccset_pc", 0);
+        let _ = s.insert(1);
+        let _ = s.insert(2);
+        let _ = s.insert(3);
+    }
+    assert!(peak("on/sccset_pc") >= 3);
+    assert_eq!(count("on/sccset_pc") - before, 1);
+}
+
+#[test]
+fn tscctree_records_peak_and_count() {
+    // scc::TreeIndex: Drop records len(), so insert N items and check peak >= N.
+    let before = count("on/scctree_pc");
+    {
+        let t: TrackedSccTreeIndex<u32, u32> = tscctree!("on/scctree_pc", 0);
+        let _ = t.insert(1, 10);
+        let _ = t.insert(2, 20);
+        let _ = t.insert(3, 30);
+    }
+    assert!(peak("on/scctree_pc") >= 3);
+    assert_eq!(count("on/scctree_pc") - before, 1);
+}
+
+// ── Задача 2: регрессионные тесты IntoIterator-ловушки ───────────────────────
+
+#[test]
+fn tvec_into_iter_records_peak_before_consume() {
+    // Regression: into_iter must call record_peak BEFORE mem::take.
+    // If the record_peak call is removed, Drop records 0 and this test fails.
+    {
+        let v: TrackedVec<u32> = tvec!("on/vec_iter", 32);
+        let _collected: Vec<u32> = v.into_iter().collect();
+    }
+    assert!(
+        peak("on/vec_iter") >= 32,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tmap_into_iter_records_peak_before_consume() {
+    // TrackedIndexMap also has IntoIterator with mem::replace + mem::forget.
+    {
+        let mut m: TrackedIndexMap<u32, u32> = tmap!("on/map_iter", 16);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        let _collected: Vec<(u32, u32)> = m.into_iter().collect();
+    }
+    assert!(
+        peak("on/map_iter") >= 16,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tfxmap_into_iter_records_peak_before_consume() {
+    // TrackedHashMap has IntoIterator with mem::replace + mem::forget.
+    {
+        let mut m: TrackedHashMap<u32, u32> = tfxmap!("on/fxmap_iter", 16);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        let _collected: Vec<(u32, u32)> = m.into_iter().collect();
+    }
+    assert!(
+        peak("on/fxmap_iter") >= 16,
+        "peak must be recorded before inner is consumed by into_iter"
+    );
+}
+
+#[test]
+fn tbtreemap_into_iter_records_peak_before_consume() {
+    // TrackedBTreeMap has IntoIterator with mem::take + mem::forget.
+    // BTreeMap uses len() as peak, so we insert N items.
+    {
+        let mut m: TrackedBTreeMap<u32, u32> = tbtreemap!("on/btreemap_iter", 0);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        m.insert(3, 30);
+        let _collected: Vec<(u32, u32)> = m.into_iter().collect();
+    }
+    assert!(
+        peak("on/btreemap_iter") >= 3,
+        "peak must be recorded (via len) before inner is consumed by into_iter"
     );
 }

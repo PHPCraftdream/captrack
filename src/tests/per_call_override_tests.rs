@@ -92,3 +92,82 @@ fn default_arm_does_not_use_counting_hasher() {
         "default arm must not call counting hasher"
     );
 }
+
+#[test]
+fn tfxmap_semicolon_arm_uses_provided_hasher() {
+    let builder = CountingBuildHasher::new();
+    let mut m = tfxmap!("override_test/fxmap", 4; builder.clone());
+    m.insert(1u32, "hello");
+    m.insert(2u32, "world");
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tfxmap! (build_count = {})",
+        builder.build_count()
+    );
+}
+
+#[test]
+fn tfxset_semicolon_arm_uses_provided_hasher() {
+    let builder = CountingBuildHasher::new();
+    let mut s = tfxset!("override_test/fxset", 4; builder.clone());
+    s.insert(1u32);
+    s.insert(2u32);
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tfxset! (build_count = {})",
+        builder.build_count()
+    );
+}
+
+#[test]
+fn tset_semicolon_arm_uses_provided_hasher() {
+    let builder = CountingBuildHasher::new();
+    let mut s = tset!("override_test/set", 4; builder.clone());
+    s.insert(1u32);
+    s.insert(2u32);
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tset! (build_count = {})",
+        builder.build_count()
+    );
+}
+
+#[test]
+fn tdashmap_semicolon_arm_uses_provided_hasher() {
+    // DashMap requires BuildHasher + Clone — CountingBuildHasher already derives Clone.
+    let builder = CountingBuildHasher::new();
+    let m = tdashmap!("override_test/dashmap", 4; builder.clone());
+    m.insert(1u32, "hello");
+    m.insert(2u32, "world");
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tdashmap! (build_count = {})",
+        builder.build_count()
+    );
+}
+
+#[test]
+fn tsccmap_semicolon_arm_uses_provided_hasher() {
+    let builder = CountingBuildHasher::new();
+    let m = tsccmap!("override_test/sccmap", 4; builder.clone());
+    let _ = m.insert(1u32, "hello");
+    let _ = m.insert(2u32, "world");
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tsccmap! (build_count = {})",
+        builder.build_count()
+    );
+}
+
+#[test]
+fn tsccset_semicolon_arm_uses_provided_hasher() {
+    let builder = CountingBuildHasher::new();
+    let s = tsccset!("override_test/sccset", 4; builder.clone());
+    let _ = s.insert(1u32);
+    let _ = s.insert(2u32);
+    assert!(
+        builder.build_count() > 0,
+        "custom hasher must be used for tsccset! (build_count = {})",
+        builder.build_count()
+    );
+}
