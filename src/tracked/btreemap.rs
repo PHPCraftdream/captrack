@@ -3,11 +3,21 @@ use std::collections::BTreeMap;
 use crate::registry;
 use crate::IntoInner;
 
-/// A `BTreeMap<K, V>` wrapper that records creation count and peak occupancy.
+/// A `BTreeMap<K, V>` wrapper that records creation count and capacity samples.
 ///
 /// `BTreeMap` has no `with_capacity` so the capacity hint passed to the macro
-/// is accepted but ignored for the inner allocation.  In Drop, `inner.len()`
-/// is used as the peak metric (B-tree capacity is not observable).
+/// is accepted but ignored for the inner allocation.
+///
+/// # Samples record `len()`, NOT peak occupancy
+///
+/// B-tree capacity is not observable.  On every `Drop` (or `IntoIterator` /
+/// `From` conversion), `inner.len()` is pushed as the sample — this is the
+/// element count **at the moment of Drop**, not the maximum ever observed.
+///
+/// For maps that may shrink before Drop (e.g. via `BTreeMap::clear` or
+/// repeated `remove` calls), the recorded sample **undercounts** the true
+/// peak.  Use `BTreeMap::len()` at the known peak point if accurate peak
+/// tracking is required.
 pub struct TrackedBTreeMap<K: Ord, V> {
     inner: BTreeMap<K, V>,
     #[allow(dead_code)]

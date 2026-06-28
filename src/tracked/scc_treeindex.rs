@@ -1,12 +1,20 @@
 use crate::registry;
 use crate::IntoInner;
 
-/// A `scc::TreeIndex<K, V>` wrapper that records creation count and peak
-/// occupancy.
+/// A `scc::TreeIndex<K, V>` wrapper that records creation count and capacity
+/// samples.
 ///
 /// `TreeIndex` has no `capacity()` concept and no `with_capacity` constructor.
-/// The cap hint is accepted for API uniformity but ignored.  Peak is measured
-/// via `len()` on Drop (O(N) — telemetry only).
+/// The cap hint is accepted for API uniformity but ignored.
+///
+/// # Samples record `len()`, NOT peak occupancy
+///
+/// On every `Drop` (or `From` conversion), `inner.len()` is pushed as the
+/// sample — this is the element count **at the moment of Drop**, not the
+/// maximum ever observed.  If entries are removed before Drop, the recorded
+/// sample **undercounts** the true peak.
+///
+/// `scc::TreeIndex::len()` is O(N) — only called on Drop (telemetry only).
 pub struct TrackedSccTreeIndex<K, V>
 where
     K: Clone + Ord + 'static,

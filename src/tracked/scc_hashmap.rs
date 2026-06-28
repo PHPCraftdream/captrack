@@ -3,10 +3,21 @@ use std::hash::{BuildHasher, Hash};
 use crate::registry;
 use crate::IntoInner;
 
-/// A `scc::HashMap<K, V, S>` wrapper that records creation count and peak
-/// occupancy.
+/// A `scc::HashMap<K, V, S>` wrapper that records creation count and capacity
+/// samples.
 ///
 /// `S` defaults to `crate::CapHasher`.
+///
+/// # Samples record `len()`, NOT peak occupancy
+///
+/// `scc::HashMap` does not expose a `capacity()` method.  On every `Drop` (or
+/// `From` conversion), `inner.len()` is pushed as the sample — this is the
+/// element count **at the moment of Drop**, not the maximum ever observed.
+///
+/// If entries are removed before Drop (e.g. via `HashMap::remove` or bulk
+/// operations), the recorded sample **undercounts** the true peak.  Use
+/// explicit `len()` snapshots at known peak points if accurate peak tracking
+/// is required for shrinking maps.
 ///
 /// `scc::HashMap::len()` is O(N) — only called on Drop (telemetry path).
 pub struct TrackedSccHashMap<K, V, S = crate::CapHasher>

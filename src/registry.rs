@@ -12,6 +12,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 /// Per-location capacity statistics accumulated over the lifetime of the process.
+///
+/// # `creation_count` vs `samples.len()`
+///
+/// `creation_count` counts every call to the constructor (incremented on
+/// creation).  `samples` accumulates one entry per `Drop` or `into_iter` call.
+/// In steady state these counts match, but they can diverge:
+///
+/// * **In-flight instances** — created but not yet dropped push to
+///   `creation_count` without yet pushing to `samples`.
+/// * **`std::mem::forget`** — the wrapper is consumed without running Drop,
+///   so no sample is recorded.
+/// * **Panic in Drop** — the Drop impl is aborted before `record_sample`
+///   is reached.
+///
+/// `creation_count - samples.len()` is therefore an indicator of the number
+/// of in-flight or leaked instances at the time of inspection.
 pub struct CapStats {
     pub name: &'static str, // fixed at first insert, never changed
     pub creation_count: AtomicU64,

@@ -29,6 +29,24 @@
 //!
 //! When `telemetry` IS active these aliases are never compiled — the real
 //! `TrackedX` structs from `tracked::` win.
+//!
+//! ## Hasher default consistency
+//!
+//! Aliases for hash types (`HashMap`, `HashSet`, `IndexMap`, `IndexSet`,
+//! `DashMap`, `scc::HashMap`, `scc::HashSet`) default `S = CapHasher`.  This
+//! matches the on-feature `Tracked*` struct defaults, keeping the type
+//! signatures identical across both modes.
+//!
+//! Without any hasher feature, `CapHasher == RandomState` and the alias is
+//! identical to `std::HashMap<K, V>` etc.
+//!
+//! **Caveat**: when the consumer enables `fxhash` / `ahash` / `foldhash` /
+//! `rustc-hash`, `CapHasher` changes to the fast hasher and the alias
+//! silently changes its default `S` relative to a hand-written bare
+//! `std::HashMap<K, V>` (which always uses `RandomState`).  Mixing the alias
+//! with bare collections in the same scope then needs explicit type
+//! annotations such as `let m: HashMap<_, _, _> = ...` to disambiguate the
+//! hasher parameter.
 
 #![cfg(not(feature = "telemetry"))]
 #![allow(clippy::disallowed_types)] // mirroring std/third-party types is the whole point

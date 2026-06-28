@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Capacity telemetry for Rust collections — call-site macros that record peak capacity, with zero overhead when disabled."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/captrack"
+repository = "https://github.com/example/captrack" # TODO: replace with real repo URL before publishing
 keywords = ["telemetry", "capacity", "profiling", "collections", "performance"]
 categories = ["development-tools::profiling"]
 

@@ -16,8 +16,11 @@
 //! * **`p99`** — covers 99% of cases, one realloc per 100 instances.
 //! * **`p95`** — balance memory vs realloc rate.
 //! * **`median`** — typical case; cheap memory, may realloc often on the tail.
-//! * **`mean + 2*stddev`** — under Gaussian assumption, covers ~97.5%
-//!   (consider `stddev` to decide if the workload is predictable or bursty).
+//!
+//! Capacity samples are typically heavily right-skewed (geometric growth:
+//! 4, 8, 16, 32, 64, …).  They are **NOT Gaussian** — `mean + 2*stddev` is a
+//! misleading recommendation for this distribution.  Use `p95` or `p99`
+//! directly; they return actual observed capacities that match how `Vec` grows.
 //!
 //! # Example
 //!

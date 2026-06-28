@@ -1,7 +1,7 @@
 # captrack
 
-Capacity telemetry for Rust collections — call-site macros that record peak
-capacity, with **zero overhead when disabled**.
+Capacity telemetry for Rust collections — call-site macros that record actual
+observed capacities, with **zero overhead when disabled**.
 
 ## What it does
 
@@ -9,20 +9,54 @@ capacity, with **zero overhead when disabled**.
 When the `telemetry` feature is **off** (the default) each macro expands to
 the bare constructor — the compiler sees exactly `Vec::with_capacity(n)` etc.
 and optimises accordingly.  When `telemetry` is **on**, each macro returns a
-thin `Tracked*` wrapper that records two counters in a global lock-free
-registry (using `scc::HashMap`):
+thin `Tracked*` wrapper that records per-call-site statistics in a global
+lock-free registry (using `scc::HashMap` + `scc::Bag`):
 
-- `peak_capacity` — maximum capacity observed across all instances of that name.
-- `creation_count` — total number of times that call-site was reached.
+- **Registry key** — `(file, line, column)` of the macro call-site, not the
+  name string.  Each distinct source location is one independent entry.
+- **`creation_count`** — total number of instances created at that call-site
+  (atomic `u64`, updated on construction).
+- **`samples`** — a raw list of observed capacities/lengths pushed on every
+  `Drop` or `into_iter` (lock-free `scc::Bag<usize>`; one entry per instance):
+  - For capacity-based collections (`Vec`, `VecDeque`, `HashMap`, `HashSet`,
+    `IndexMap`, `IndexSet`, `BytesMut`): records `inner.capacity()` — this is
+    the allocated backing-store size, which grows monotonically, so the final
+    value equals the peak.
+  - For length-based collections (`BTreeMap`, `BTreeSet`, `DashMap`,
+    `scc::HashMap`, `scc::HashSet`, `scc::TreeIndex`): records `inner.len()`
+    at the moment of Drop.  This is **NOT** peak occupancy — if the collection
+    shrinks before Drop the recorded value undercounts the true peak.
 
 At the end of a benchmark call `captrack::dump_capacity_stats("path.json")` to
 write a sorted JSON report.
 
+```json
+{
+  "version": 1,
+  "stats": [
+    {
+      "name": "engine/write_batch",
+      "file": "src/engine.rs",
+      "line": 142,
+      "column": 17,
+      "creation_count": 1234,
+      "samples": [16, 32, 32, 64, 64, 64, 128, 128, 256, 1024]
+    }
+  ]
+}
 ```
-[
-  { "name": "engine/write_batch", "peak_capacity": 512, "creation_count": 1234 },
-  ...
-]
+
+Entries are sorted by `max(samples)` descending so the largest allocations
+surface first.  The `samples` list is a raw per-instance snapshot; aggregate
+statistics (median, p95, p99, stddev) are computed in post-processing:
+
+```rust
+use captrack::SampleStats;
+
+// After deserialising the JSON — for each entry:
+if let Some(stats) = SampleStats::from_samples(&entry.samples) {
+    println!("p95 = {}, median = {}", stats.p95, stats.median);
+}
 ```
 
 Use the data to replace guesses like `Vec::with_capacity(16)` with
@@ -34,6 +68,9 @@ data-driven values.
 [dependencies]
 captrack = "0.1"
 indexmap = "2"   # for tmap!/tset!
+
+# To use TrackedIndexMap as a type alias even without telemetry:
+# captrack = { version = "0.1", features = ["indexmap"] }
 ```
 
 ```rust
@@ -55,8 +92,21 @@ let mut b = tbtreemap!("my_module/sorted", 0);
 captrack = { version = "0.1", features = ["telemetry"] }
 ```
 
-Off (default) = zero overhead, bare constructors.
-On = `Tracked*` wrappers, global registry, JSON dump.
+Off (default) = zero overhead, bare constructors.  `TrackedX` names are still
+available as type aliases to the underlying std/third-party types via
+`src/aliases.rs`.
+
+On = `Tracked*` wrapper structs, global lock-free registry (`scc::HashMap`
+keyed by call-site location), JSON dump.  Enabling `telemetry` automatically
+activates all optional mirror features (`bytes`, `indexmap`, `dashmap`, `scc`).
+
+The `TrackedX` alias mirror features let you use e.g. `TrackedIndexMap` in
+off-feature mode without pulling in telemetry overhead:
+
+```toml
+[dependencies]
+captrack = { version = "0.1", features = ["indexmap"] }  # TrackedIndexMap alias, no telemetry
+```
 
 ```rust
 // Works in both modes — no #[cfg] needed:

@@ -5,12 +5,20 @@ use dashmap::DashMap;
 use crate::registry;
 use crate::IntoInner;
 
-/// A `DashMap<K, V, S>` wrapper that records creation count and peak occupancy.
+/// A `DashMap<K, V, S>` wrapper that records creation count and capacity samples.
 ///
 /// `S` defaults to `crate::CapHasher`.
 ///
-/// `DashMap` does not expose a `capacity()` method, so peak is measured via
-/// `len()` on Drop.
+/// # Samples record `len()`, NOT peak occupancy
+///
+/// `DashMap` does not expose a `capacity()` method.  On every `Drop` (or
+/// `From` conversion), `inner.len()` is pushed as the sample — this is the
+/// element count **at the moment of Drop**, not the maximum ever observed.
+///
+/// If entries are removed from the map before it is dropped (e.g. via
+/// `DashMap::remove` or `DashMap::clear`), the recorded sample **undercounts**
+/// the true peak.  Use explicit `len()` snapshots at known peak points if
+/// accurate peak tracking is required for shrinking maps.
 ///
 /// # Telemetry note
 ///

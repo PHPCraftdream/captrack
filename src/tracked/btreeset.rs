@@ -3,10 +3,21 @@ use std::collections::BTreeSet;
 use crate::registry;
 use crate::IntoInner;
 
-/// A `BTreeSet<T>` wrapper that records creation count and peak occupancy.
+/// A `BTreeSet<T>` wrapper that records creation count and capacity samples.
 ///
 /// Like `TrackedBTreeMap`, the capacity hint is accepted but ignored for the
-/// inner allocation, and peak is measured via `len()` on Drop.
+/// inner allocation.
+///
+/// # Samples record `len()`, NOT peak occupancy
+///
+/// B-tree capacity is not observable.  On every `Drop` (or `IntoIterator` /
+/// `From` conversion), `inner.len()` is pushed as the sample — this is the
+/// element count **at the moment of Drop**, not the maximum ever observed.
+///
+/// For sets that may shrink before Drop (e.g. via `BTreeSet::clear` or
+/// repeated `remove` calls), the recorded sample **undercounts** the true
+/// peak.  Use `BTreeSet::len()` at the known peak point if accurate peak
+/// tracking is required.
 pub struct TrackedBTreeSet<T: Ord> {
     inner: BTreeSet<T>,
     #[allow(dead_code)]
