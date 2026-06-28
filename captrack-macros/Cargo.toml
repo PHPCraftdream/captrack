@@ -6,9 +6,8 @@ authors = ["Marat K <phpcraftdream@gmail.com>"]
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
 description = "Proc-macro companion for captrack — generates per-hasher macro families via declare_collections!."
-repository = "https://github.com/example/captrack" # TODO: replace with real repo URL before publishing
-# TODO: replace with real URLs before publishing
-homepage = "https://github.com/example/captrack"
+repository = "https://github.com/PHPCraftdream/captrack"
+homepage = "https://github.com/PHPCraftdream/captrack"
 documentation = "https://docs.rs/captrack"
 keywords = ["telemetry", "proc-macro", "captrack", "collections", "macros"]
 categories = ["development-tools::profiling"]

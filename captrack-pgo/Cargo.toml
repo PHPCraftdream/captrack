@@ -6,9 +6,8 @@ rust-version = "1.74"
 authors = ["Marat K <phpcraftdream@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "Profile-guided capacity optimization for Rust collections — measure with dhat or captrack, propose data-driven Vec::with_capacity(N) values, apply in-place."
-# TODO: replace with real repo URL before publishing
-repository = "https://github.com/example/captrack"
-homepage = "https://github.com/example/captrack"
+repository = "https://github.com/PHPCraftdream/captrack"
+homepage = "https://github.com/PHPCraftdream/captrack"
 documentation = "https://docs.rs/captrack-pgo"
 readme = "../README.md"
 keywords = ["capacity", "pgo", "profiling", "telemetry", "performance"]

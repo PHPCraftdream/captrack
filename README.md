@@ -1,5 +1,11 @@
 # captrack
 
+[![CI](https://github.com/PHPCraftdream/captrack/actions/workflows/ci.yml/badge.svg)](https://github.com/PHPCraftdream/captrack/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV: 1.74](https://img.shields.io/badge/MSRV-1.74-orange.svg)](https://github.com/PHPCraftdream/captrack#minimum-supported-rust-version)
+[![docs.rs](https://img.shields.io/docsrs/captrack)](https://docs.rs/captrack)
+[![crates.io](https://img.shields.io/crates/v/captrack.svg)](https://crates.io/crates/captrack)
+
 Capacity telemetry for Rust collections — call-site macros that record actual
 observed capacities, with **zero overhead when disabled**.
 

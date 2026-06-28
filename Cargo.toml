@@ -6,9 +6,8 @@ authors = ["Marat K <phpcraftdream@gmail.com>"]
 rust-version = "1.74"
 description = "Capacity telemetry for Rust collections — call-site macros that record peak capacity, with zero overhead when disabled."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/captrack" # TODO: replace with real repo URL before publishing
-# TODO: replace with real URLs before publishing
-homepage = "https://github.com/example/captrack"
+repository = "https://github.com/PHPCraftdream/captrack"
+homepage = "https://github.com/PHPCraftdream/captrack"
 documentation = "https://docs.rs/captrack"
 readme = "README.md"
 keywords = ["telemetry", "capacity", "profiling", "collections", "performance"]

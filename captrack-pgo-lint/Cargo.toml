@@ -5,6 +5,8 @@ edition = "2021"
 authors = ["Marat K <phpcraftdream@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "Dylint plugin powering captrack-pgo semantic apply: rewrites collection constructors based on profile-data recommendations."
+repository = "https://github.com/PHPCraftdream/captrack"
+homepage = "https://github.com/PHPCraftdream/captrack"
 publish = false
 
 [lib]
