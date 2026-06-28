@@ -27,7 +27,7 @@ include = [
 ]
 
 [workspace]
-members = [".", "captrack-macros"]
+members = [".", "captrack-macros", "captrack-pgo"]
 
 [features]
 default = []

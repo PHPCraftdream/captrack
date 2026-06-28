@@ -1,0 +1,33 @@
+[package]
+name = "captrack-pgo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["Marat K <phpcraftdream@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Profile-guided capacity optimization for Rust collections — measure with dhat or captrack, propose data-driven Vec::with_capacity(N) values, apply in-place."
+# TODO: replace with real repo URL before publishing
+repository = "https://github.com/example/captrack"
+homepage = "https://github.com/example/captrack"
+documentation = "https://docs.rs/captrack-pgo"
+readme = "../README.md"
+keywords = ["capacity", "pgo", "profiling", "telemetry", "performance"]
+categories = ["development-tools::profiling", "command-line-utilities"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }  # КРИТИЧНО для file:line:col из spans
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+anyhow = "1"
+ignore = "0.4"  # gitignore-aware walk
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "captrack-pgo"
+path = "src/main.rs"
