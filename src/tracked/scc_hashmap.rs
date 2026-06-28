@@ -89,3 +89,21 @@ impl<K: Eq + Hash + 'static, V: 'static, S: BuildHasher> Drop for TrackedSccHash
         registry::record_sample(self.file, self.line, self.column, peak);
     }
 }
+
+// `From` requires `S: Default` to construct a temporary empty map for
+// `mem::replace`.  scc::HashMap metrics use `len()` (same as Drop).
+impl<K: Eq + Hash + 'static, V: 'static, S: BuildHasher + Default> From<TrackedSccHashMap<K, V, S>>
+    for scc::HashMap<K, V, S>
+{
+    fn from(mut tracked: TrackedSccHashMap<K, V, S>) -> scc::HashMap<K, V, S> {
+        #[allow(clippy::disallowed_methods)]
+        let peak = tracked.inner.len();
+        registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
+        let inner = std::mem::replace(
+            &mut tracked.inner,
+            scc::HashMap::with_capacity_and_hasher(0, S::default()),
+        );
+        std::mem::forget(tracked);
+        inner
+    }
+}

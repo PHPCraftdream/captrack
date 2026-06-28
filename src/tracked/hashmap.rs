@@ -83,6 +83,20 @@ impl<K, V, S> Drop for TrackedHashMap<K, V, S> {
     }
 }
 
+impl<K: Eq + Hash, V, S: BuildHasher + Default> From<TrackedHashMap<K, V, S>> for HashMap<K, V, S> {
+    fn from(mut tracked: TrackedHashMap<K, V, S>) -> HashMap<K, V, S> {
+        registry::record_sample(
+            tracked.file,
+            tracked.line,
+            tracked.column,
+            tracked.inner.capacity(),
+        );
+        let inner = std::mem::replace(&mut tracked.inner, HashMap::with_hasher(S::default()));
+        std::mem::forget(tracked);
+        inner
+    }
+}
+
 impl<K: Eq + Hash, V, S: BuildHasher + Default> IntoIterator for TrackedHashMap<K, V, S> {
     type Item = (K, V);
     type IntoIter = std::collections::hash_map::IntoIter<K, V>;

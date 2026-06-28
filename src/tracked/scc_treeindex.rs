@@ -61,3 +61,16 @@ impl<K: Clone + Ord + 'static, V: Clone + 'static> Drop for TrackedSccTreeIndex<
         registry::record_sample(self.file, self.line, self.column, peak);
     }
 }
+
+impl<K: Clone + Ord + 'static, V: Clone + 'static> From<TrackedSccTreeIndex<K, V>>
+    for scc::TreeIndex<K, V>
+{
+    fn from(mut tracked: TrackedSccTreeIndex<K, V>) -> scc::TreeIndex<K, V> {
+        #[allow(clippy::disallowed_methods)]
+        let peak = tracked.inner.len();
+        registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
+        let inner = std::mem::replace(&mut tracked.inner, scc::TreeIndex::new());
+        std::mem::forget(tracked);
+        inner
+    }
+}

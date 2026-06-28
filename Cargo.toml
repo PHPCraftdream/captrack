@@ -24,6 +24,15 @@ ahash      = ["dep:ahash"]
 foldhash   = ["dep:foldhash"]
 rustc-hash = ["dep:rustc-hash"]
 
+# Off-feature alias mirror features — pull in the dep WITHOUT activating telemetry.
+# Consumers add e.g. `captrack = { features = ["bytes"] }` to get `TrackedBytesMut`
+# as a type alias to `bytes::BytesMut` in off-feature mode.
+# (When `telemetry` is active these are redundant — the real Tracked* structs win.)
+bytes    = ["dep:bytes"]
+indexmap = ["dep:indexmap"]
+dashmap  = ["dep:dashmap"]
+scc      = ["dep:scc"]
+
 [dependencies]
 captrack-macros = { path = "captrack-macros", version = "0.1.0" }
 

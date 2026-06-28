@@ -33,10 +33,7 @@ mod inner {
         stats: Vec<Entry>,
     }
 
-    fn entry_from(
-        (file, line, column): (&'static str, u32, u32),
-        stats: &CapStats,
-    ) -> Entry {
+    fn entry_from((file, line, column): (&'static str, u32, u32), stats: &CapStats) -> Entry {
         let samples = stats
             .samples
             .lock()

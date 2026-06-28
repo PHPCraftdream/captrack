@@ -79,6 +79,20 @@ impl<T, S> Drop for TrackedHashSet<T, S> {
     }
 }
 
+impl<T: Eq + Hash, S: BuildHasher + Default> From<TrackedHashSet<T, S>> for HashSet<T, S> {
+    fn from(mut tracked: TrackedHashSet<T, S>) -> HashSet<T, S> {
+        registry::record_sample(
+            tracked.file,
+            tracked.line,
+            tracked.column,
+            tracked.inner.capacity(),
+        );
+        let inner = std::mem::replace(&mut tracked.inner, HashSet::with_hasher(S::default()));
+        std::mem::forget(tracked);
+        inner
+    }
+}
+
 impl<T: Eq + Hash, S: BuildHasher + Default> IntoIterator for TrackedHashSet<T, S> {
     type Item = T;
     type IntoIter = std::collections::hash_set::IntoIter<T>;

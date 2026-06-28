@@ -167,7 +167,12 @@ fn dump_writes_valid_json() {
         "samples for on/dump must not be empty"
     );
     assert!(
-        our_samples.iter().filter_map(|v| v.as_u64()).max().unwrap_or(0) >= 128,
+        our_samples
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .max()
+            .unwrap_or(0)
+            >= 128,
         "max sample for on/dump must be >= 128"
     );
     assert!(
@@ -374,24 +379,23 @@ fn tfxmap_into_iter_records_peak_before_consume() {
 }
 
 #[test]
-fn into_vec_records_sample_on_conversion() {
-    use crate::IntoVec;
-    let before = count("on/into_vec");
+fn untrack_records_sample_on_conversion() {
+    let before = count("on/untrack");
     {
-        let mut v: TrackedVec<u32> = tvec!("on/into_vec", 64);
+        let mut v: TrackedVec<u32> = tvec!("on/untrack", 64);
         v.push(1);
-        let raw: Vec<u32> = v.into_vec();
+        let raw: Vec<u32> = untrack!(v);
         // raw is now a bare Vec — Drop runs on it, not on TrackedVec.
         assert_eq!(raw.len(), 1);
         assert!(raw.capacity() >= 64);
     }
-    // Sample should be recorded by From<TrackedVec> for Vec (called via IntoVec).
+    // Sample should be recorded by From<TrackedVec> for Vec (called via untrack!).
     // Without the explicit record_sample in From, peak would be 0.
     assert!(
-        peak("on/into_vec") >= 64,
-        "into_vec() must record capacity sample before unwrapping inner"
+        peak("on/untrack") >= 64,
+        "untrack!() must record capacity sample before unwrapping inner"
     );
-    assert_eq!(count("on/into_vec") - before, 1);
+    assert_eq!(count("on/untrack") - before, 1);
 }
 
 #[test]

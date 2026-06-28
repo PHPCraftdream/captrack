@@ -57,6 +57,20 @@ impl<K: Ord, V> Drop for TrackedBTreeMap<K, V> {
     }
 }
 
+impl<K: Ord, V> From<TrackedBTreeMap<K, V>> for BTreeMap<K, V> {
+    fn from(mut tracked: TrackedBTreeMap<K, V>) -> BTreeMap<K, V> {
+        registry::record_sample(
+            tracked.file,
+            tracked.line,
+            tracked.column,
+            tracked.inner.len(),
+        );
+        let inner = std::mem::take(&mut tracked.inner);
+        std::mem::forget(tracked);
+        inner
+    }
+}
+
 impl<K: Ord, V> IntoIterator for TrackedBTreeMap<K, V> {
     type Item = (K, V);
     type IntoIter = std::collections::btree_map::IntoIter<K, V>;

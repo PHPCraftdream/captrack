@@ -49,3 +49,17 @@ impl Drop for TrackedBytesMut {
         registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
     }
 }
+
+impl From<TrackedBytesMut> for BytesMut {
+    fn from(mut tracked: TrackedBytesMut) -> BytesMut {
+        registry::record_sample(
+            tracked.file,
+            tracked.line,
+            tracked.column,
+            tracked.inner.capacity(),
+        );
+        let inner = std::mem::take(&mut tracked.inner);
+        std::mem::forget(tracked);
+        inner
+    }
+}

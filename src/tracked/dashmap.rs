@@ -90,3 +90,21 @@ impl<K: Eq + Hash, V, S: BuildHasher + Clone> Drop for TrackedDashMap<K, V, S> {
         registry::record_sample(self.file, self.line, self.column, peak);
     }
 }
+
+// `From` requires `S: Default` to construct a temporary empty `DashMap` for
+// `mem::replace`.  DashMap's metrics use `len()` (same as Drop).
+impl<K: Eq + Hash, V, S: BuildHasher + Clone + Default> From<TrackedDashMap<K, V, S>>
+    for DashMap<K, V, S>
+{
+    fn from(mut tracked: TrackedDashMap<K, V, S>) -> DashMap<K, V, S> {
+        #[allow(clippy::disallowed_methods)]
+        let peak = tracked.inner.len();
+        registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
+        let inner = std::mem::replace(
+            &mut tracked.inner,
+            DashMap::with_capacity_and_hasher(0, S::default()),
+        );
+        std::mem::forget(tracked);
+        inner
+    }
+}

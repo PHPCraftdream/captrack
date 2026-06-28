@@ -83,3 +83,21 @@ impl<T: Eq + Hash + 'static, S: BuildHasher> Drop for TrackedSccHashSet<T, S> {
         registry::record_sample(self.file, self.line, self.column, peak);
     }
 }
+
+// `From` requires `S: Default` to construct a temporary empty set for
+// `mem::replace`.  scc::HashSet metrics use `len()` (same as Drop).
+impl<T: Eq + Hash + 'static, S: BuildHasher + Default> From<TrackedSccHashSet<T, S>>
+    for scc::HashSet<T, S>
+{
+    fn from(mut tracked: TrackedSccHashSet<T, S>) -> scc::HashSet<T, S> {
+        #[allow(clippy::disallowed_methods)]
+        let peak = tracked.inner.len();
+        registry::record_sample(tracked.file, tracked.line, tracked.column, peak);
+        let inner = std::mem::replace(
+            &mut tracked.inner,
+            scc::HashSet::with_capacity_and_hasher(0, S::default()),
+        );
+        std::mem::forget(tracked);
+        inner
+    }
+}

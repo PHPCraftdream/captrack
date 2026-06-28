@@ -168,12 +168,11 @@ fn dump_is_noop_in_off_feature() {
 }
 
 #[test]
-fn into_vec_identity_in_off_feature() {
-    use crate::IntoVec;
-    let mut v = tvec!("test/into_vec", 8);
+fn untrack_identity_in_off_feature() {
+    let mut v = tvec!("test/untrack", 8);
     v.push(1u32);
     v.push(2u32);
-    let raw: Vec<u32> = v.into_vec();
+    let raw: Vec<u32> = untrack!(v);
     assert_eq!(raw.len(), 2);
     assert!(raw.capacity() >= 8);
 }

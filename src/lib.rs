@@ -75,6 +75,9 @@
 //! * `telemetry` — enables `Tracked*` wrappers and the global registry.
 //! * `fxhash` / `ahash` / `foldhash` / `rustc-hash` — select the global
 //!   [`CapHasher`].  Select at most one; default is `RandomState`.
+//! * `bytes` / `indexmap` / `dashmap` / `scc` — off-feature type-alias
+//!   mirror features (no telemetry overhead; let consumers use `TrackedX`
+//!   names in both modes when they depend on these crates).
 
 // ---------------------------------------------------------------------------
 // Sub-modules
@@ -89,6 +92,15 @@ pub mod dump;
 
 #[cfg(feature = "telemetry")]
 mod tracked;
+
+/// Off-feature type aliases — `TrackedX<T>` = `StdX<T>` when telemetry is off.
+#[cfg(not(feature = "telemetry"))]
+pub mod aliases;
+
+/// Free constructor functions used by unified macros — cfg-branched on
+/// `feature = "telemetry"`.  Available for the always-present std types.
+#[doc(hidden)]
+pub mod ctor;
 
 // ---------------------------------------------------------------------------
 // Public re-exports
@@ -105,72 +117,91 @@ pub use tracked::{
     TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
 };
 
+#[cfg(not(feature = "telemetry"))]
+pub use aliases::*;
+
 // ---------------------------------------------------------------------------
-// Cross-feature boundary bridges
+// `untrack!` — boundary conversion without clippy::useless_conversion
 //
-// `tvec!(...)` returns `Vec<T>` in off-feature mode and `TrackedVec<T>` in
-// on-feature mode.  When a user function's return type is `Vec<T>` (not generic
-// over the feature flag), the same source code must compile in BOTH modes.
+// Off-feature: identity (`$e` as-is) — the value is already a bare type.
+//              No `.into()`, no clippy warning.
+// On-feature:  `From::from($e)` — uses the `From<TrackedX> for StdX` impls
+//              that record the final capacity sample before unwrapping.
 //
-// Naive `.into()` at the call-site works (via the `From<TrackedVec<T>> for
-// Vec<T>` impl in `tracked/vec.rs`) but trips `clippy::useless_conversion` in
-// off-feature mode (`Vec<T> -> Vec<T>` is the identity).  Sprinkling
-// `#[allow]` across every boundary is ugly.
+// Usage:
 //
-// `IntoVec::into_vec()` solves this: it's the identity move in off-feature
-// (no clippy warning, no overhead) and the `Vec::from(tracked)` conversion in
-// on-feature (records the final capacity sample, then unwraps `inner`).
-//
-// This pattern is currently provided for `Vec<T>` only.  If downstream code
-// hits the same boundary problem with other collection types (`HashMap`,
-// `IndexMap`, etc.), the same pattern extends mechanically — per-type traits
-// (`IntoHashMap`, `IntoIndexMap`, ...) with identity impls for the bare type
-// and conversion impls for the `Tracked*` wrapper.
+//   fn build() -> Vec<u32> {
+//       let mut v = tvec!("my/rows", 64);
+//       v.push(1u32);
+//       untrack!(v)   // compiles & correct in BOTH feature modes
+//   }
 // ---------------------------------------------------------------------------
 
-/// Convert a `tvec!`-produced value into a plain `Vec<T>`.
+/// Convert a `t*!`-produced value into the corresponding bare standard type
+/// at an API boundary.
 ///
-/// Off-feature: identity move (`Vec<T>` returned as-is, no allocation, no
-/// clippy `useless_conversion` warning).
-///
-/// On-feature: records the final `capacity()` sample in the registry, then
-/// returns the inner `Vec<T>` (uses the `From<TrackedVec<T>> for Vec<T>` impl).
+/// * **Off-feature** — identity: the value is already a bare type.  No
+///   allocation, no copy, no clippy `useless_conversion` warning.
+/// * **On-feature** — calls `From::from` which uses the `From<TrackedX> for
+///   StdX` impl: records the final capacity sample in the registry, then
+///   unwraps the inner collection.
 ///
 /// # Examples
 ///
-/// ```
-/// # use captrack::{tvec, IntoVec};
+/// ```ignore
+/// use captrack::{tvec, untrack};
+///
 /// fn build() -> Vec<u32> {
-///     let mut v = tvec!("doc/build", 16);
-///     v.push(1);
-///     v.into_vec() // compiles & is correct in BOTH feature modes
+///     let mut v = tvec!("my/rows", 64);
+///     v.push(1u32);
+///     untrack!(v) // identical source in both feature modes
 /// }
 /// ```
-pub trait IntoVec<T> {
-    fn into_vec(self) -> Vec<T>;
-}
-
-impl<T> IntoVec<T> for Vec<T> {
-    #[inline]
-    fn into_vec(self) -> Vec<T> {
-        self
-    }
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! untrack {
+    ($e:expr) => {
+        $e
+    };
 }
 
 #[cfg(feature = "telemetry")]
-impl<T> IntoVec<T> for TrackedVec<T> {
-    #[inline]
-    fn into_vec(self) -> Vec<T> {
-        Vec::from(self)
-    }
+#[macro_export]
+macro_rules! untrack {
+    ($e:expr) => {
+        ::core::convert::From::from($e)
+    };
 }
 
 // ---------------------------------------------------------------------------
 // 13 call-site macros
 //
-// CRITICAL: every off-feature expansion is wrapped in `{ #[allow(...)] expr }`
-// so that when callers add `disallowed-methods` bans on bare constructors,
-// the macros themselves don't trigger those lints on call-sites.
+// ARCHITECTURE NOTE — unified vs dual-branch macros:
+//
+//   • The 6 standard-library macros (tvec!, tvecdeque!, tbtreemap!, tbtreeset!,
+//     tfxmap!, tfxset!) are **unified**: a single `macro_rules!` declaration
+//     delegates to `$crate::ctor::<fn>(...)` which is cfg-branched internally.
+//     The ctor functions are always part of the library because std is always
+//     available.
+//
+//   • The 7 optional-third-party macros (tbytesmut!, tmap!, tset!, tdashmap!,
+//     tsccmap!, tsccset!, tscctree!) keep **dual cfg arms**.  The reason:
+//     ctor free-functions that reference `::bytes::BytesMut`, `::indexmap::...`
+//     etc. must compile as part of the library, which requires those crates in
+//     the library dependency graph.  In off-feature mode without the matching
+//     captrack feature flag the crate is absent; the macro expansion, by
+//     contrast, is resolved at the call site (consumer's context) where the
+//     consumer already has the dep.
+//
+//     On-feature arms of these 7 macros delegate to `Tracked*::..._named(...)`.
+//
+//   This is an implementation detail; from the consumer's perspective all 13
+//   macros have the same call syntax and all `TrackedX` type names are
+//   available in both modes.
+//
+// CRITICAL: every off-feature expansion uses `#[allow(clippy::disallowed_methods,
+//   clippy::disallowed_types)]` so user-supplied ban-lists don't fire on
+//   captrack-generated code.
 //
 // Each hash macro has TWO arms:
 //   1. `($name, $cap)` — uses CapHasher (global default, Axis 2A).
@@ -190,24 +221,12 @@ impl<T> IntoVec<T> for TrackedVec<T> {
 /// v.push(1u32);
 /// assert_eq!(v.len(), 1);
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tvec {
     ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_methods)]
-            ::std::vec::Vec::with_capacity($cap)
-        }
+        $crate::ctor::vec_with_capacity_named::<_>($cap, $name, file!(), line!(), column!())
     }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tvec {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedVec::with_capacity_named($cap, $name, file!(), line!(), column!())
-    };
 }
 
 // ── tvecdeque! ───────────────────────────────────────────────────────────────
@@ -222,24 +241,12 @@ macro_rules! tvec {
 /// let mut d = tvecdeque!("my/deque", 8);
 /// d.push_back(42u32);
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tvecdeque {
     ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_methods)]
-            ::std::collections::VecDeque::with_capacity($cap)
-        }
+        $crate::ctor::vecdeque_with_capacity_named::<_>($cap, $name, file!(), line!(), column!())
     }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tvecdeque {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedVecDeque::with_capacity_named($cap, $name, file!(), line!(), column!())
-    };
 }
 
 // ── tbtreemap! ───────────────────────────────────────────────────────────────
@@ -253,24 +260,12 @@ macro_rules! tvecdeque {
 /// let mut m = tbtreemap!("my/btreemap", 0);
 /// m.insert(1u32, "hello");
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tbtreemap {
-    ($name:literal, $_cap:expr) => {{
+    ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_methods)]
-            ::std::collections::BTreeMap::new()
-        }
+        $crate::ctor::btreemap_new_named::<_, _>($cap, $name, file!(), line!(), column!())
     }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tbtreemap {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedBTreeMap::new_named($cap, $name, file!(), line!(), column!())
-    };
 }
 
 // ── tbtreeset! ───────────────────────────────────────────────────────────────
@@ -284,24 +279,12 @@ macro_rules! tbtreemap {
 /// let mut s = tbtreeset!("my/btreeset", 0);
 /// s.insert(42u32);
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tbtreeset {
-    ($name:literal, $_cap:expr) => {{
+    ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_methods)]
-            ::std::collections::BTreeSet::new()
-        }
+        $crate::ctor::btreeset_new_named::<_>($cap, $name, file!(), line!(), column!())
     }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tbtreeset {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedBTreeSet::new_named($cap, $name, file!(), line!(), column!())
-    };
 }
 
 // ── tbytesmut! ───────────────────────────────────────────────────────────────
@@ -353,42 +336,21 @@ macro_rules! tbytesmut {
 /// // per-call override:
 /// let mut m2 = tfxmap!("my/special", 8; ahash::RandomState::new());
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tfxmap {
     ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-            ::std::collections::HashMap::with_capacity_and_hasher(
-                $cap,
-                <$crate::CapHasher as ::core::default::Default>::default(),
-            )
-        }
-    }};
-    ($name:literal, $cap:expr; $hasher:expr) => {{
-        let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-            ::std::collections::HashMap::with_capacity_and_hasher($cap, $hasher)
-        }
-    }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tfxmap {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedHashMap::<_, _, $crate::CapHasher>::with_capacity_named(
+        $crate::ctor::hashmap_with_capacity_named::<_, _, $crate::CapHasher>(
             $cap,
             $name,
             file!(),
             line!(),
             column!(),
         )
-    };
-    ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedHashMap::with_capacity_and_hasher_named(
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashmap_with_capacity_and_hasher_named(
             $cap,
             $hasher,
             $name,
@@ -396,7 +358,7 @@ macro_rules! tfxmap {
             line!(),
             column!(),
         )
-    };
+    }};
 }
 
 // ── tfxset! ──────────────────────────────────────────────────────────────────
@@ -410,42 +372,21 @@ macro_rules! tfxmap {
 /// let mut s = tfxset!("my/set", 8);
 /// s.insert(42u32);
 /// ```
-#[cfg(not(feature = "telemetry"))]
 #[macro_export]
 macro_rules! tfxset {
     ($name:literal, $cap:expr) => {{
         let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-            ::std::collections::HashSet::with_capacity_and_hasher(
-                $cap,
-                <$crate::CapHasher as ::core::default::Default>::default(),
-            )
-        }
-    }};
-    ($name:literal, $cap:expr; $hasher:expr) => {{
-        let _: &'static str = $name;
-        {
-            #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-            ::std::collections::HashSet::with_capacity_and_hasher($cap, $hasher)
-        }
-    }};
-}
-
-#[cfg(feature = "telemetry")]
-#[macro_export]
-macro_rules! tfxset {
-    ($name:literal, $cap:expr) => {
-        $crate::TrackedHashSet::<_, $crate::CapHasher>::with_capacity_named(
+        $crate::ctor::hashset_with_capacity_named::<_, $crate::CapHasher>(
             $cap,
             $name,
             file!(),
             line!(),
             column!(),
         )
-    };
-    ($name:literal, $cap:expr; $hasher:expr) => {
-        $crate::TrackedHashSet::with_capacity_and_hasher_named(
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        $crate::ctor::hashset_with_capacity_and_hasher_named(
             $cap,
             $hasher,
             $name,
@@ -453,7 +394,7 @@ macro_rules! tfxset {
             line!(),
             column!(),
         )
-    };
+    }};
 }
 
 // ── tmap! ────────────────────────────────────────────────────────────────────

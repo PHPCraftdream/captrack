@@ -50,6 +50,20 @@ impl<T> Drop for TrackedVecDeque<T> {
     }
 }
 
+impl<T> From<TrackedVecDeque<T>> for VecDeque<T> {
+    fn from(mut tracked: TrackedVecDeque<T>) -> VecDeque<T> {
+        registry::record_sample(
+            tracked.file,
+            tracked.line,
+            tracked.column,
+            tracked.inner.capacity(),
+        );
+        let inner = std::mem::take(&mut tracked.inner);
+        std::mem::forget(tracked);
+        inner
+    }
+}
+
 impl<T> IntoIterator for TrackedVecDeque<T> {
     type Item = T;
     type IntoIter = std::collections::vec_deque::IntoIter<T>;
