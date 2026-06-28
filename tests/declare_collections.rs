@@ -145,6 +145,65 @@ fn declare_collections_fxset_works() {
     assert!(s.contains(&42u32));
 }
 
+// ── Регрессия: file!()/line!() ловят user call-site через слой macro_rules ──
+//
+// captrack ключует реестр по (file, line, column).  Это работает только если
+// `file!()`/`line!()`/`column!()` внутри `tvec!` (и далее в свободной функции
+// `ctor::vec_with_capacity_named`) резолвятся в источник КЛИЕНТА, а не в
+// captrack/src/lib.rs (где они написаны).  Это стандартное поведение для
+// std-макросов вроде `dbg!`/`log!`/`tracing!`, но через declare_collections!
+// добавляется ВТОРОЙ слой macro_rules (`q_vec!` → `::captrack::tvec!` → ctor::)
+// — span должен протащиться сквозь оба слоя.
+//
+// Если эти тесты упадут — это сигнал, что место создания пишется неправильно
+// (например, у всех вызовов через q_*! в дампе будет видно captrack/src/lib.rs).
+
+#[cfg(feature = "telemetry")]
+fn lookup_loc(name: &'static str) -> Option<(&'static str, u32, u32)> {
+    let mut found = None;
+    captrack::registry::registry().scan(|key, stats| {
+        if stats.name == name {
+            found = Some(*key);
+        }
+    });
+    found
+}
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn span_captured_from_direct_tvec_call_site() {
+    let expected_line = line!() + 1;
+    let _v: captrack::TrackedVec<u32> = captrack::tvec!("loc/direct_tvec", 4);
+    drop(_v);
+
+    let (file, line, _column) = lookup_loc("loc/direct_tvec").expect("entry exists");
+    assert!(
+        file.replace('\\', "/")
+            .ends_with("tests/declare_collections.rs"),
+        "expected user call-site file, got {file}"
+    );
+    assert_eq!(line, expected_line, "line span lost");
+}
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn span_captured_through_declare_collections_layer() {
+    let expected_line = line!() + 1;
+    let _v: captrack::TrackedVec<u32> = q_vec!("loc/via_declared", 4);
+    drop(_v);
+
+    let (file, line, _column) = lookup_loc("loc/via_declared").expect("entry exists");
+    assert!(
+        file.replace('\\', "/")
+            .ends_with("tests/declare_collections.rs"),
+        "span resolved to {file} — declare_collections! layer LOST user span"
+    );
+    assert_eq!(
+        line, expected_line,
+        "line resolved to {line} (expected {expected_line}) — declare_collections! layer LOST user span"
+    );
+}
+
 // Тест на `;`-arm поверх кастомного дефолта.
 #[test]
 fn declare_collections_map_semicolon_arm_works() {
