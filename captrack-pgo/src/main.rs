@@ -1,3 +1,11 @@
-fn main() {
-    eprintln!("captrack-pgo: scaffold only — see Step 2 for CLI implementation.");
+//! captrack-pgo — profile-guided capacity optimization.
+//!
+//! See `docs/CAPACITY-PGO-PLAN.md` for the design rationale.
+
+mod cli;
+
+fn main() -> anyhow::Result<()> {
+    use clap::Parser;
+    let args = cli::Cli::parse();
+    cli::dispatch(args)
 }
