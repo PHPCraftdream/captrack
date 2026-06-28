@@ -24,11 +24,6 @@
 //! suggesting non-pow2 forces an extra realloc).  `round_to_8` available
 //! via the `Rounding` knob.
 
-// Public API types are declared here for use by sibling modules that do not
-// exist yet (plan, apply, undo).  Suppress the false-positive dead-code lint
-// until those modules are wired in (Step 9+).
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::model::{CapExpr, SiteStats, Unit};
@@ -100,6 +95,10 @@ pub fn apply_rounding(n: usize, mode: Rounding) -> usize {
 }
 
 /// Core decision routine.  Pure: no side effects, no I/O.
+///
+/// Convenience wrapper around `propose_cap_with` with default `RuleConfig`.
+/// Primarily used in unit tests; production code goes through `build_plan`.
+#[allow(dead_code)]
 pub fn propose_cap(stats: &SiteStats, current: &CapExpr) -> Decision {
     propose_cap_with(stats, current, RuleConfig::default())
 }

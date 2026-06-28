@@ -6,9 +6,6 @@
 //! `walk_rust_files` — yield every `.rs` file under a root, respecting
 //! `.gitignore` and skipping `target/`.
 
-// Public API is wired in by scan.rs (Step 7); allow dead_code until then.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};

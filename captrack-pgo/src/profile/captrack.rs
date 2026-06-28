@@ -7,10 +7,6 @@
 //! and carries the raw per-instance samples array, so true `p50`/`p95` are
 //! computed via `captrack::SampleStats` rather than collapsed to peak.
 
-// Functions and types here will be consumed by cli.rs / plan.rs in later
-// steps.  Suppress dead-code lints until the wiring is complete.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};

@@ -4,9 +4,6 @@
 //! statistics.  The planner consumes the trait, so the rest of the pipeline
 //! is backend-agnostic.
 
-// Public API types will be consumed by plan.rs / cli.rs added in later steps.
-#![allow(dead_code)]
-
 use crate::model::SiteStats;
 
 pub mod captrack;

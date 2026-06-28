@@ -77,8 +77,12 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Measure { bench } => {
             eprintln!("measure --bench {bench}: not yet implemented");
         }
-        Command::Propose { .. } => {
-            eprintln!("propose: not yet implemented");
+        Command::Propose {
+            workspace,
+            heap,
+            captrack_dump,
+        } => {
+            run_propose(workspace, heap, captrack_dump)?;
         }
         Command::Apply { .. } => {
             eprintln!("apply: not yet implemented");
@@ -90,5 +94,67 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             eprintln!("auto: not yet implemented");
         }
     }
+    Ok(())
+}
+
+fn relativize(path: &std::path::Path, root: &std::path::Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn run_propose(
+    workspace: Option<PathBuf>,
+    heap: Option<PathBuf>,
+    captrack_dump: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use crate::{plan, profile, report, scan, workspace as ws};
+    use anyhow::Context;
+    use profile::Profile;
+
+    let start = workspace.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let root = ws::find_workspace_root(&start)
+        .with_context(|| format!("locate workspace root from {}", start.display()))?;
+
+    // Load profile.
+    let stats = match (heap, captrack_dump) {
+        (Some(h), None) => {
+            let p = profile::dhat::DhatProfile::new(h, root.clone());
+            p.sites()?
+        }
+        (None, Some(c)) => {
+            let p = profile::captrack::CaptrackProfile::new(c);
+            p.sites()?
+        }
+        (None, None) => {
+            anyhow::bail!("one of --heap or --captrack-dump is required");
+        }
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with enforces this"),
+    };
+
+    // Scan workspace.
+    let mut sites = Vec::new();
+    for file in ws::walk_rust_files(&root) {
+        match scan::scan_file(&file, false) {
+            Ok(mut s) => sites.append(&mut s),
+            Err(e) => eprintln!(
+                "captrack-pgo: warning: skip {} (parse error: {})",
+                file.display(),
+                e
+            ),
+        }
+    }
+
+    let mut plan = plan::build_plan(sites, stats);
+
+    // Relativize paths against workspace root for readability.
+    for entry in &mut plan.entries {
+        entry.key.file = relativize(&entry.key.file, &root);
+    }
+    for (key, _) in &mut plan.skipped {
+        key.file = relativize(&key.file, &root);
+    }
+
+    print!("{}", report::render_report(&plan));
     Ok(())
 }

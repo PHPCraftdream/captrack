@@ -7,8 +7,6 @@
 //! isn't in source).  AST sites without profile data are silently
 //! skipped — they simply weren't exercised by the measurement run.
 
-#![allow(dead_code)] // lifts in Step 10 when CLI wiring uses build_plan
-
 use std::collections::HashMap;
 
 use crate::model::{AllocSite, PatchEntry, PatchPlan, SiteKey, SiteStats};

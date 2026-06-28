@@ -14,10 +14,6 @@
 //! so `p50` and `p95` are populated with `peak` — documented at the parser
 //! level so downstream rules can detect "no distribution" if they care.
 
-// Functions and types here will be consumed by cli.rs / plan.rs in later
-// steps.  Suppress dead-code lints until the wiring is complete.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

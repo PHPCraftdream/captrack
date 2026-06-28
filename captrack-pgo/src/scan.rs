@@ -5,8 +5,6 @@
 //! right is the linchpin of the whole tool — a one-byte offset error
 //! corrupts the file.  See module tests for the contract.
 
-#![allow(dead_code)] // lifts when plan.rs (Step 9) starts using these
-
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 

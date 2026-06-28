@@ -5,11 +5,6 @@
 //! aggregate the profile backend produced, and the patcher doesn't care
 //! where the numbers came from.
 
-// Public API types are declared here for use by sibling modules that do not
-// exist yet (profile, scan, plan, apply, undo).  Suppress the false-positive
-// dead-code lint until those modules are wired in.
-#![allow(dead_code)]
-
 use std::ops::Range;
 use std::path::PathBuf;
 

@@ -6,6 +6,7 @@ mod cli;
 mod model;
 mod plan;
 mod profile;
+mod report;
 mod rules;
 mod scan;
 mod workspace;
