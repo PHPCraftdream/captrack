@@ -49,10 +49,17 @@ fn declare_collections_map_telemetry_recorded() {
     let mut peak = 0usize;
     captrack::registry::registry().scan(|_, stats| {
         if stats.name == "declare/telemetry_map" {
-            if let Ok(v) = stats.samples.lock() {
-                if let Some(&max_here) = v.iter().max() {
-                    peak = peak.max(max_here);
-                }
+            // scc::Bag has no non-destructive shared-reference iterator; drain and
+            // push back to keep the bag intact.
+            let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
+                v.push(x);
+                v
+            });
+            for &s in &samples {
+                stats.samples.push(s);
+            }
+            if let Some(&max_here) = samples.iter().max() {
+                peak = peak.max(max_here);
             }
         }
     });

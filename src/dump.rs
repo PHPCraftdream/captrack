@@ -34,11 +34,15 @@ mod inner {
     }
 
     fn entry_from((file, line, column): (&'static str, u32, u32), stats: &CapStats) -> Entry {
-        let samples = stats
-            .samples
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        // scc::Bag has no non-destructive shared-reference iterator, so we drain
+        // via pop_all and push all values back to leave the bag intact between dumps.
+        let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
+            v.push(x);
+            v
+        });
+        for &s in &samples {
+            stats.samples.push(s);
+        }
         Entry {
             name: stats.name,
             file,

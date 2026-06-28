@@ -9,14 +9,15 @@
 // that each call-site in source code = one distinct entry.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// Per-location capacity statistics accumulated over the lifetime of the process.
 pub struct CapStats {
     pub name: &'static str, // fixed at first insert, never changed
     pub creation_count: AtomicU64,
     /// One sample per Drop/into_iter call — raw capacities for post-processing.
-    pub samples: Mutex<Vec<usize>>,
+    /// Lock-free push via scc::Bag; order is not guaranteed (fine for max/percentile/sum).
+    pub samples: scc::Bag<usize>,
 }
 
 impl CapStats {
@@ -24,7 +25,7 @@ impl CapStats {
         Self {
             name,
             creation_count: AtomicU64::new(0),
-            samples: Mutex::new(Vec::new()),
+            samples: scc::Bag::new(),
         }
     }
 }
@@ -68,15 +69,14 @@ pub fn record_creation(name: &'static str, file: &'static str, line: u32, column
 
 /// Record a capacity sample for the call-site. Called from every `Drop` impl
 /// and `IntoIterator::into_iter` impl.
-/// Mutex poison is ignored — telemetry is best-effort.
+/// Lock-free: scc::Bag::push does not block or return an error.
 pub fn record_sample(file: &'static str, line: u32, column: u32, cap: usize) {
-    if let Some(entry) = registry().get(&(file, line, column)) {
-        if let Ok(mut v) = entry.samples.lock() {
-            v.push(cap);
-        }
-        // If the mutex is poisoned we silently skip — telemetry is best-effort.
+    let entry = registry().get(&(file, line, column));
+    debug_assert!(
+        entry.is_some(),
+        "record_sample called for unregistered location {file}:{line}:{column}"
+    );
+    if let Some(entry) = entry {
+        entry.samples.push(cap);
     }
-    // If the entry is somehow absent (can only happen if record_creation was
-    // never called for this location, which violates our contract) we silently
-    // ignore.
 }

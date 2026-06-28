@@ -21,10 +21,17 @@ fn peak(name: &'static str) -> usize {
     let mut m = 0;
     registry::registry().scan(|_, stats| {
         if stats.name == name {
-            if let Ok(v) = stats.samples.lock() {
-                if let Some(&max_here) = v.iter().max() {
-                    m = m.max(max_here);
-                }
+            // scc::Bag has no non-destructive shared-reference iterator; drain and
+            // push back to keep the bag intact.
+            let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
+                v.push(x);
+                v
+            });
+            for &s in &samples {
+                stats.samples.push(s);
+            }
+            if let Some(&max_here) = samples.iter().max() {
+                m = m.max(max_here);
             }
         }
     });
