@@ -129,7 +129,7 @@ fn dry_run_prints_notice_and_does_not_modify_files() {
     let manifest = root
         .join("target")
         .join("captrack-pgo")
-        .join("last-lint-apply.json");
+        .join("last-apply.json");
     assert!(!manifest.exists(), "dry-run must not write a manifest");
 }
 
@@ -277,7 +277,7 @@ fn live_apply_rewrites_vec_new_and_writes_manifest() {
     let manifest = root
         .join("target")
         .join("captrack-pgo")
-        .join("last-lint-apply.json");
+        .join("last-apply.json");
     assert!(manifest.exists(), "manifest must be written");
 
     let manifest_json =
@@ -285,7 +285,7 @@ fn live_apply_rewrites_vec_new_and_writes_manifest() {
             .unwrap();
     assert_eq!(manifest_json["version"], 1);
     assert!(
-        manifest_json["files"].as_array().unwrap().len() >= 1,
+        !manifest_json["files"].as_array().unwrap().is_empty(),
         "at least one file entry expected"
     );
 }
@@ -334,6 +334,6 @@ fn live_dry_run_does_not_modify_and_no_manifest() {
     let manifest = root
         .join("target")
         .join("captrack-pgo")
-        .join("last-lint-apply.json");
+        .join("last-apply.json");
     assert!(!manifest.exists(), "dry-run must not write manifest");
 }

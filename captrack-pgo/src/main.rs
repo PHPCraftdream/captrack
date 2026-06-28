@@ -6,6 +6,7 @@
 
 mod cli;
 mod lint_apply;
+mod lint_instrument;
 mod model;
 mod profile;
 mod workspace;
