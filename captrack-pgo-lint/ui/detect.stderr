@@ -1,0 +1,16 @@
+warning: captrack-pgo: profile shows peak=1024 elements, p95=512, count=100 — consider with_capacity
+  --> $DIR/detect.rs:11:23
+   |
+LL |     let _v: Vec<u8> = Vec::new();
+   |                       ^^^^^^^^^^
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+
+warning: captrack-pgo: profile shows peak=1024 elements, p95=512, count=100 — consider with_capacity
+  --> $DIR/detect.rs:29:24
+   |
+LL |     let _v2: Vec<u8> = Vec::with_capacity(10);
+   |                        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 2 warnings emitted
+
