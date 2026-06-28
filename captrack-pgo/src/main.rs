@@ -10,6 +10,7 @@ mod profile;
 mod report;
 mod rules;
 mod scan;
+mod undo;
 mod workspace;
 
 fn main() -> anyhow::Result<()> {

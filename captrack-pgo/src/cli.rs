@@ -92,8 +92,8 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             run_apply(workspace, heap, captrack_dump, commit)?;
         }
-        Command::Undo { .. } => {
-            eprintln!("undo: not yet implemented");
+        Command::Undo { manifest } => {
+            run_undo(manifest)?;
         }
         Command::Auto { .. } => {
             eprintln!("auto: not yet implemented");
@@ -174,6 +174,24 @@ fn run_propose(
     }
 
     print!("{}", report::render_report(&plan));
+    Ok(())
+}
+
+fn run_undo(manifest: Option<PathBuf>) -> anyhow::Result<()> {
+    use crate::workspace as ws;
+    let path = match manifest {
+        Some(p) => p,
+        None => {
+            let root = ws::find_workspace_root(&std::env::current_dir()?)?;
+            crate::undo::default_manifest_path(&root)
+        }
+    };
+    let n = crate::undo::undo_from(&path)?;
+    println!(
+        "reverted {n} patch{} from {}",
+        if n == 1 { "" } else { "es" },
+        path.display()
+    );
     Ok(())
 }
 
