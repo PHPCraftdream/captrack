@@ -4,6 +4,7 @@
 
 mod cli;
 mod model;
+mod profile;
 
 fn main() -> anyhow::Result<()> {
     use clap::Parser;

@@ -1,0 +1,30 @@
+{
+  "dhatFileVersion": 2,
+  "mode": "heap",
+  "pps": [
+    {
+      "tb": 2048,
+      "tbk": 10,
+      "tl": 100,
+      "mb": 2048,
+      "mbk": 1,
+      "gb": 0, "gbk": 0, "eb": 0, "ebk": 0,
+      "fs": [0, 1, 2, 3]
+    },
+    {
+      "tb": 4096,
+      "tbk": 20,
+      "tl": 200,
+      "mb": 4096,
+      "mbk": 1,
+      "gb": 0, "gbk": 0, "eb": 0, "ebk": 0,
+      "fs": [0, 1, 2, 3]
+    }
+  ],
+  "ftbl": [
+    "[root]",
+    "0xAA: alloc::alloc::Global::alloc_impl (/rustc/abc/library/alloc/src/alloc.rs:181:73)",
+    "0xBB: alloc::raw_vec::RawVec::reserve (/rustc/abc/library/alloc/src/raw_vec.rs:300:13)",
+    "0xCC: my_app::worker (crates/my-app/src/lib.rs:42:17)"
+  ]
+}
