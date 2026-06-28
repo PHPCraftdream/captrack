@@ -24,10 +24,11 @@ serde_json = "1"
 walkdir = "2"
 anyhow = "1"
 ignore = "0.4"  # gitignore-aware walk
+sha2 = "0.10"
+tempfile = "3"
 captrack = { path = "..", default-features = false }
 
 [dev-dependencies]
-tempfile = "3"
 
 [[bin]]
 name = "captrack-pgo"

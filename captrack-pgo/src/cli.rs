@@ -84,8 +84,13 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             run_propose(workspace, heap, captrack_dump)?;
         }
-        Command::Apply { .. } => {
-            eprintln!("apply: not yet implemented");
+        Command::Apply {
+            workspace,
+            heap,
+            captrack_dump,
+            commit,
+        } => {
+            run_apply(workspace, heap, captrack_dump, commit)?;
         }
         Command::Undo { .. } => {
             eprintln!("undo: not yet implemented");
@@ -103,12 +108,14 @@ fn relativize(path: &std::path::Path, root: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn run_propose(
+/// Shared helper: resolve workspace root, load profile, scan AST, build plan.
+/// Returns (workspace_root, plan).
+fn build_plan_from_profile(
     workspace: Option<PathBuf>,
     heap: Option<PathBuf>,
     captrack_dump: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    use crate::{plan, profile, report, scan, workspace as ws};
+) -> anyhow::Result<(PathBuf, crate::model::PatchPlan)> {
+    use crate::{plan, profile, scan, workspace as ws};
     use anyhow::Context;
     use profile::Profile;
 
@@ -145,7 +152,18 @@ fn run_propose(
         }
     }
 
-    let mut plan = plan::build_plan(sites, stats);
+    let built = plan::build_plan(sites, stats);
+    Ok((root, built))
+}
+
+fn run_propose(
+    workspace: Option<PathBuf>,
+    heap: Option<PathBuf>,
+    captrack_dump: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use crate::report;
+
+    let (root, mut plan) = build_plan_from_profile(workspace, heap, captrack_dump)?;
 
     // Relativize paths against workspace root for readability.
     for entry in &mut plan.entries {
@@ -156,5 +174,52 @@ fn run_propose(
     }
 
     print!("{}", report::render_report(&plan));
+    Ok(())
+}
+
+fn run_apply(
+    workspace: Option<PathBuf>,
+    heap: Option<PathBuf>,
+    captrack_dump: Option<PathBuf>,
+    commit: bool,
+) -> anyhow::Result<()> {
+    use crate::{apply, report};
+
+    let (root, plan) = build_plan_from_profile(workspace, heap, captrack_dump)?;
+
+    // Always print the human-readable report so the user sees what would change.
+    {
+        let mut display_plan = plan.clone();
+        for entry in &mut display_plan.entries {
+            entry.key.file = relativize(&entry.key.file, &root);
+        }
+        for (key, _) in &mut display_plan.skipped {
+            key.file = relativize(&key.file, &root);
+        }
+        print!("{}", report::render_report(&display_plan));
+    }
+
+    if commit && !plan.entries.is_empty() {
+        let manifest = apply::apply_plan(&plan, &root, false)?;
+        let manifest_path = root
+            .join("target")
+            .join("captrack-pgo")
+            .join("last-apply.json");
+        println!(
+            "Applied {} patch(es). Manifest written to {}",
+            manifest.entries.len(),
+            manifest_path.display()
+        );
+    } else if plan.entries.is_empty() {
+        println!("Nothing to apply.");
+    } else {
+        // dry-run
+        let manifest = apply::apply_plan(&plan, &root, true)?;
+        println!(
+            "(dry-run; {} patch(es) would be applied — pass --commit to write changes)",
+            manifest.entries.len()
+        );
+    }
+
     Ok(())
 }

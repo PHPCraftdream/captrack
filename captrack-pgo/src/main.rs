@@ -2,6 +2,7 @@
 //!
 //! See `docs/CAPACITY-PGO-PLAN.md` for the design rationale.
 
+mod apply;
 mod cli;
 mod model;
 mod plan;
