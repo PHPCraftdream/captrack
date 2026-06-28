@@ -1,0 +1,103 @@
+# clippy.toml.example — copy (fully or partially) into your project's clippy.toml
+# to enforce the use of captrack macros at every collection call-site.
+#
+# Axis 3 — Policy belongs to the consumer, not to captrack itself.
+# The captrack macros carry `#[allow(clippy::disallowed_methods)]` in their
+# expansions, so they are always safe regardless of this policy.
+#
+# Strategy:
+#   - Full adoption: copy the entire file.
+#   - Partial: copy only the families you want to enforce.
+#   - None: don't copy anything (telemetry still works via macros).
+
+disallowed-methods = [
+    # ── Vec ──────────────────────────────────────────────────────────────────
+    { path = "std::vec::Vec::new",
+      reason = "use captrack::tvec!(\"name\", cap)" },
+    { path = "std::vec::Vec::with_capacity",
+      reason = "use captrack::tvec!(\"name\", cap)" },
+
+    # ── HashMap ───────────────────────────────────────────────────────────────
+    { path = "std::collections::HashMap::new",
+      reason = "use captrack::tfxmap!(\"name\", cap)" },
+    { path = "std::collections::HashMap::with_capacity",
+      reason = "use captrack::tfxmap!(\"name\", cap)" },
+    { path = "std::collections::HashMap::with_hasher",
+      reason = "use captrack::tfxmap!(\"name\", cap)" },
+    { path = "std::collections::HashMap::with_capacity_and_hasher",
+      reason = "use captrack::tfxmap!(\"name\", cap)" },
+
+    # ── HashSet ───────────────────────────────────────────────────────────────
+    { path = "std::collections::HashSet::new",
+      reason = "use captrack::tfxset!(\"name\", cap)" },
+    { path = "std::collections::HashSet::with_capacity",
+      reason = "use captrack::tfxset!(\"name\", cap)" },
+    { path = "std::collections::HashSet::with_hasher",
+      reason = "use captrack::tfxset!(\"name\", cap)" },
+    { path = "std::collections::HashSet::with_capacity_and_hasher",
+      reason = "use captrack::tfxset!(\"name\", cap)" },
+
+    # ── BTreeMap / BTreeSet ───────────────────────────────────────────────────
+    { path = "std::collections::BTreeMap::new",
+      reason = "use captrack::tbtreemap!(\"name\", cap_hint)" },
+    { path = "std::collections::BTreeSet::new",
+      reason = "use captrack::tbtreeset!(\"name\", cap_hint)" },
+
+    # ── VecDeque ──────────────────────────────────────────────────────────────
+    { path = "std::collections::VecDeque::new",
+      reason = "use captrack::tvecdeque!(\"name\", cap)" },
+    { path = "std::collections::VecDeque::with_capacity",
+      reason = "use captrack::tvecdeque!(\"name\", cap)" },
+
+    # ── bytes ─────────────────────────────────────────────────────────────────
+    { path = "bytes::Bytes::new",
+      reason = "use captrack::tbytesmut!(\"name\", cap)" },
+    { path = "bytes::BytesMut::new",
+      reason = "use captrack::tbytesmut!(\"name\", cap)" },
+    { path = "bytes::BytesMut::with_capacity",
+      reason = "use captrack::tbytesmut!(\"name\", cap)" },
+
+    # ── indexmap ──────────────────────────────────────────────────────────────
+    { path = "indexmap::IndexMap::new",
+      reason = "use captrack::tmap!(\"name\", cap)" },
+    { path = "indexmap::IndexMap::with_capacity",
+      reason = "use captrack::tmap!(\"name\", cap)" },
+    { path = "indexmap::IndexMap::with_hasher",
+      reason = "use captrack::tmap!(\"name\", cap)" },
+    { path = "indexmap::IndexMap::with_capacity_and_hasher",
+      reason = "use captrack::tmap!(\"name\", cap)" },
+    { path = "indexmap::IndexSet::new",
+      reason = "use captrack::tset!(\"name\", cap)" },
+    { path = "indexmap::IndexSet::with_capacity",
+      reason = "use captrack::tset!(\"name\", cap)" },
+    { path = "indexmap::IndexSet::with_hasher",
+      reason = "use captrack::tset!(\"name\", cap)" },
+    { path = "indexmap::IndexSet::with_capacity_and_hasher",
+      reason = "use captrack::tset!(\"name\", cap)" },
+
+    # ── dashmap ───────────────────────────────────────────────────────────────
+    { path = "dashmap::DashMap::new",
+      reason = "use captrack::tdashmap!(\"name\", cap)" },
+    { path = "dashmap::DashMap::with_capacity",
+      reason = "use captrack::tdashmap!(\"name\", cap)" },
+    { path = "dashmap::DashMap::with_hasher",
+      reason = "use captrack::tdashmap!(\"name\", cap)" },
+    { path = "dashmap::DashMap::with_capacity_and_hasher",
+      reason = "use captrack::tdashmap!(\"name\", cap)" },
+
+    # ── scc ───────────────────────────────────────────────────────────────────
+    { path = "scc::HashMap::new",
+      reason = "use captrack::tsccmap!(\"name\", cap)" },
+    { path = "scc::HashMap::with_capacity",
+      reason = "use captrack::tsccmap!(\"name\", cap)" },
+    { path = "scc::HashSet::new",
+      reason = "use captrack::tsccset!(\"name\", cap)" },
+    { path = "scc::HashSet::with_capacity",
+      reason = "use captrack::tsccset!(\"name\", cap)" },
+    { path = "scc::TreeIndex::new",
+      reason = "use captrack::tscctree!(\"name\", cap_hint)" },
+
+    # ── String / &str — NOT banned (user exception). ──────────────────────────
+    # String is commonly used for format!/error messages where capacity
+    # planning is rarely worthwhile.
+]

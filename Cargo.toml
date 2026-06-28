@@ -1,0 +1,61 @@
+[package]
+name = "captrack"
+version = "0.1.0"
+edition = "2021"
+description = "Capacity telemetry for Rust collections — call-site macros that record peak capacity, with zero overhead when disabled."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/captrack"
+keywords = ["telemetry", "capacity", "profiling", "collections", "performance"]
+categories = ["development-tools::profiling"]
+
+[workspace]
+members = [".", "captrack-macros"]
+
+[features]
+default = []
+# Axis 1: telemetry on/off
+# Enables TrackedX wrappers, global registry, and JSON dump.
+# Without this feature all macros expand to bare constructors with zero overhead.
+telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap"]
+
+# Axis 2A: default hasher (select at most one; default = RandomState)
+fxhash     = ["dep:fxhash"]
+ahash      = ["dep:ahash"]
+foldhash   = ["dep:foldhash"]
+rustc-hash = ["dep:rustc-hash"]
+
+[dependencies]
+captrack-macros = { path = "captrack-macros", version = "0.1.0" }
+
+# Optional — pulled in only with `telemetry`.
+scc        = { version = "2.2",  optional = true }
+serde      = { version = "1",    optional = true, features = ["derive"] }
+serde_json = { version = "1",    optional = true }
+
+# Optional collection deps — callers bring their own; listed here so that
+# off-feature macro expansions can reference the types in doc-examples and
+# tests.  Real consumers add these as their own direct deps.
+bytes      = { version = "1",    optional = true }
+indexmap   = { version = "2",    optional = true }
+dashmap    = { version = "6",    optional = true }
+
+# Hasher backends (optional, axis 2A)
+fxhash     = { version = "0.2",  optional = true }
+ahash      = { version = "0.8",  optional = true }
+foldhash   = { version = "0.1",  optional = true }
+rustc-hash = { version = "2",    optional = true }
+
+[dev-dependencies]
+# Needed for the crate's own test suite which exercises macros that expand
+# to these types.  External callers bring their own deps.
+scc        = "2.2"
+bytes      = "1"
+indexmap   = "2"
+dashmap    = "6"
+serde_json = "1"
+tempfile   = "3"
+fxhash     = "0.2"
+ahash      = "0.8"
+
+[lib]
+doctest = false
