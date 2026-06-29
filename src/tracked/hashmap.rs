@@ -63,6 +63,25 @@ impl<K: Eq + Hash, V, S: BuildHasher> TrackedHashMap<K, V, S> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `HashMap<K, V, S>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is — no
+    /// reallocation.  Capacity sample recorded at `Drop` as usual.
+    ///
+    /// The hasher type `S` is inferred from `inner`, so custom hashers are
+    /// naturally preserved without any extra annotation.
+    #[inline]
+    pub fn wrap_from(
+        inner: HashMap<K, V, S>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<K, V, S> std::ops::Deref for TrackedHashMap<K, V, S> {

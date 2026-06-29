@@ -37,6 +37,26 @@ impl<A: smallvec::Array> TrackedSmallVec<A> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `SmallVec<A>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is — no
+    /// reallocation.  Capacity sample recorded at `Drop` as usual.
+    ///
+    /// This is the key entry-point for Phase K instrumentation: `smallvec![a, b, c]`
+    /// can now be wrapped universally without losing elements:
+    /// `TrackedSmallVec::wrap_from(smallvec![a, b, c], "auto:...", file!(), line!(), column!())`.
+    #[inline]
+    pub fn wrap_from(
+        inner: SmallVec<A>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<A: smallvec::Array> std::ops::Deref for TrackedSmallVec<A> {

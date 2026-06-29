@@ -45,6 +45,22 @@ impl<K: Clone + Ord + 'static, V: Clone + 'static> TrackedSccTreeIndex<K, V> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `scc::TreeIndex<K, V>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// The sample metric at `Drop` is `inner.len()` (TreeIndex has no capacity).
+    #[inline]
+    pub fn wrap_from(
+        inner: scc::TreeIndex<K, V>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<K: Clone + Ord + 'static, V: Clone + 'static> std::ops::Deref for TrackedSccTreeIndex<K, V> {

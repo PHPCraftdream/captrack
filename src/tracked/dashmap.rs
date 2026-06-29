@@ -76,6 +76,22 @@ impl<K: Eq + Hash, V, S: BuildHasher + Clone> TrackedDashMap<K, V, S> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `DashMap<K, V, S>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// The sample metric at `Drop` is `inner.len()` (DashMap has no capacity()).
+    #[inline]
+    pub fn wrap_from(
+        inner: DashMap<K, V, S>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher + Clone> std::ops::Deref for TrackedDashMap<K, V, S> {

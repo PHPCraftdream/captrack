@@ -56,6 +56,22 @@ impl<K: Eq + Hash, V, S: BuildHasher> TrackedIndexMap<K, V, S> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `IndexMap<K, V, S>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// Capacity sample recorded at `Drop` as usual.
+    #[inline]
+    pub fn wrap_from(
+        inner: IndexMap<K, V, S>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<K, V, S> std::ops::Deref for TrackedIndexMap<K, V, S> {

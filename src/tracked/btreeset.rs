@@ -44,6 +44,22 @@ impl<T: Ord> TrackedBTreeSet<T> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `BTreeSet<T>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// The sample metric at `Drop` is `inner.len()` (BTreeSet has no capacity).
+    #[inline]
+    pub fn wrap_from(
+        inner: BTreeSet<T>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<T: Ord> std::ops::Deref for TrackedBTreeSet<T> {

@@ -35,6 +35,28 @@ impl<T> TrackedVec<T> {
             column,
         }
     }
+
+    /// Wrap an already-constructed `Vec<T>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved into the wrapper
+    /// as-is — no reallocation occurs.  The capacity sample is recorded at
+    /// `Drop` (or `From`/`IntoIterator` conversion) as usual.
+    ///
+    /// This is the universal instrument entry-point used by Phase K of the
+    /// `captrack-pgo instrument` pass: instead of replacing the constructor,
+    /// the pass wraps any expression that evaluates to a `Vec<T>`, including
+    /// `vec![a, b, c]`, `Vec::from_iter(it)`, and arbitrary builder calls.
+    #[inline]
+    pub fn wrap_from(
+        inner: Vec<T>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<T> std::ops::Deref for TrackedVec<T> {

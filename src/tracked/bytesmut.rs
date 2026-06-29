@@ -30,6 +30,22 @@ impl TrackedBytesMut {
             column,
         }
     }
+
+    /// Wrap an already-constructed `BytesMut` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// Capacity sample recorded at `Drop` as usual.
+    #[inline]
+    pub fn wrap_from(
+        inner: BytesMut,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl std::ops::Deref for TrackedBytesMut {

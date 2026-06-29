@@ -73,6 +73,22 @@ impl<K: Eq + Hash + 'static, V: 'static, S: BuildHasher> TrackedSccHashMap<K, V,
             column,
         }
     }
+
+    /// Wrap an already-constructed `scc::HashMap<K, V, S>` for capacity telemetry.
+    ///
+    /// Records creation in the registry; `inner` is moved as-is.
+    /// The sample metric at `Drop` is `inner.len()` (scc::HashMap has no capacity()).
+    #[inline]
+    pub fn wrap_from(
+        inner: scc::HashMap<K, V, S>,
+        name: &'static str,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        registry::record_creation(name, file, line, column);
+        Self { inner, name, file, line, column }
+    }
 }
 
 impl<K: Eq + Hash + 'static, V: 'static, S: BuildHasher> std::ops::Deref
