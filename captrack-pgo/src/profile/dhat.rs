@@ -13,6 +13,14 @@
 //! dhat also lacks a per-allocation size distribution (only aggregates),
 //! so `p50` and `p95` are populated with `peak` — documented at the parser
 //! level so downstream rules can detect "no distribution" if they care.
+//!
+//! `mean` and `p99` are set to `None` for dhat-loaded profiles because dhat
+//! only surfaces per-program-point aggregates, not the full sample distribution
+//! needed to compute a true mean or 99th percentile.  M11 rule code falls back
+//! to `peak as f64` for `mean` and `p95` for `p99` when these fields are `None`.
+//! Consequently, `--cap-from mean` and `--cap-from p99` are degenerate for
+//! dhat-loaded profiles — they will behave the same as `--cap-from max` and
+//! `--cap-from p95` respectively.
 
 use std::path::{Path, PathBuf};
 
@@ -106,6 +114,11 @@ fn aggregate_pps(pps: &[Pp], ftbl: &[String], workspace_root: &Path) -> Result<V
                 p50: peak, // dhat lacks distribution; collapse to peak
                 p95: peak, // ditto — see module docs
                 count,
+                // dhat cannot produce per-site mean or p99 — set to None.
+                // M11 falls back to peak as f64 for mean, and p95 for p99.
+                mean: None,
+                p99: None,
+                policy: None,
             }
         })
         .collect();
@@ -251,6 +264,10 @@ mod tests {
                                  // p50/p95 collapse to peak when no distribution is available
         assert_eq!(s.p50, 4096);
         assert_eq!(s.p95, 4096);
+        // mean and p99 are None for dhat-loaded profiles — no distribution available
+        assert_eq!(s.mean, None);
+        assert_eq!(s.p99, None);
+        assert_eq!(s.policy, None);
     }
 
     #[test]

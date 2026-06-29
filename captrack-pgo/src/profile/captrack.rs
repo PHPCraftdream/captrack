@@ -67,6 +67,9 @@ fn entry_to_site_stats(e: Entry) -> SiteStats {
             p50: s.median,
             p95: s.p95,
             count: e.creation_count,
+            mean: Some(s.mean),
+            p99: Some(s.p99),
+            policy: None,
         }
     } else {
         // Empty samples (instance never dropped before dump, or just born).
@@ -78,6 +81,9 @@ fn entry_to_site_stats(e: Entry) -> SiteStats {
             p50: 0,
             p95: 0,
             count: e.creation_count,
+            mean: None,
+            p99: None,
+            policy: None,
         }
     }
 }
@@ -97,7 +103,7 @@ mod tests {
         let stats = p.sites().expect("parse must succeed");
         assert_eq!(stats.len(), 2);
 
-        // First entry: known samples → real p50/p95
+        // First entry: known samples → real p50/p95/mean/p99
         let hot = stats
             .iter()
             .find(|s| s.key.file == *"crates/engine/src/write.rs")
@@ -110,15 +116,26 @@ mod tests {
         // For sorted [16,32,32,64,64,64,128,128,256,1024]:
         // n=10, p50 = nearest-rank ceil(0.5*10)=5 → sorted[4] = 64
         // p95 = ceil(0.95*10)=10 → sorted[9] = 1024
+        // p99 = ceil(0.99*10)=10 → sorted[9] = 1024
+        // mean = (16+32+32+64+64+64+128+128+256+1024)/10 = 1808/10 = 180.8
         assert_eq!(hot.p50, 64);
         assert_eq!(hot.p95, 1024);
+        assert_eq!(hot.p99, Some(1024), "p99 must be Some for non-empty samples");
+        assert!(
+            (hot.mean.expect("mean must be Some for non-empty samples") - 180.8).abs() < 1e-9,
+            "mean should be 180.8, got {:?}",
+            hot.mean
+        );
+        assert_eq!(hot.policy, None, "policy is never set by the loader");
 
-        // Second entry: empty samples — planner will see peak=0
+        // Second entry: empty samples — planner will see peak=0, mean/p99 = None
         let cold = stats
             .iter()
             .find(|s| s.key.file == *"crates/engine/src/cold.rs")
             .expect("cold entry exists");
         assert_eq!(cold.peak, 0);
         assert_eq!(cold.count, 1);
+        assert_eq!(cold.mean, None, "mean must be None for empty samples");
+        assert_eq!(cold.p99, None, "p99 must be None for empty samples");
     }
 }

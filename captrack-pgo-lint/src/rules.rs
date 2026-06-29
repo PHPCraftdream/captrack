@@ -171,6 +171,9 @@ mod tests {
             p50: p95,
             p95,
             count,
+            mean: None,
+            p99: None,
+            policy: None,
         }
     }
 
