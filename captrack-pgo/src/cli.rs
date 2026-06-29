@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use crate::lint_apply::{self, CapFromChoice, CapRoundChoice, HasherChoice};
 use crate::lint_instrument;
+use crate::wire;
 
 #[derive(Parser, Debug)]
 #[command(name = "captrack-pgo", version, about, long_about = None)]
@@ -172,6 +173,46 @@ pub enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+
+    /// Add `captrack` as a dependency to every Cargo.toml in the target
+    /// workspace so the post-`instrument` build can resolve `::captrack::*`
+    /// paths.
+    ///
+    /// Patches the root manifest (`[workspace.dependencies] captrack = ...`)
+    /// and every member manifest (`[dependencies] captrack = { workspace = true }`).
+    /// A snapshot of every modified file is written to
+    /// `target/captrack-pgo/last-wire.json` for `unwire` to revert losslessly.
+    ///
+    /// Already-wired manifests are skipped — `wire` is idempotent.
+    Wire {
+        /// Workspace root to patch (defaults to current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Use a local `captrack` checkout via `path = "..."`.  If omitted, the
+        /// published `version = "0.1"` from crates.io is used instead.
+        #[arg(long, value_name = "PATH")]
+        captrack_path: Option<PathBuf>,
+    },
+
+    /// Remove the `captrack` dependency entries that `wire` added, restoring
+    /// every Cargo.toml to its pre-wire state.
+    ///
+    /// Reads `target/captrack-pgo/last-wire.json` (or `--manifest <path>`),
+    /// verifies each file is still in the post-wire state recorded there
+    /// (refuses to revert if the user has manually edited any of them), and
+    /// writes back the pre-wire contents.  The manifest file is deleted on
+    /// successful revert.
+    Unwire {
+        /// Workspace root (defaults to current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Explicit manifest path (defaults to
+        /// `<workspace>/target/captrack-pgo/last-wire.json`).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
 }
 
 /// Clap value_parser for `--hasher`.
@@ -258,8 +299,56 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Uninstrument { workspace, manifest } => {
             run_uninstrument(workspace, manifest)?;
         }
+        Command::Wire {
+            workspace,
+            captrack_path,
+        } => {
+            run_wire(workspace, captrack_path)?;
+        }
+        Command::Unwire {
+            workspace,
+            manifest,
+        } => {
+            run_unwire(workspace, manifest)?;
+        }
     }
     Ok(())
+}
+
+fn run_wire(
+    workspace: Option<PathBuf>,
+    captrack_path: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use crate::workspace as ws;
+    let workspace_start = workspace.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let workspace_root = ws::find_workspace_root(&workspace_start).with_context(|| {
+        format!(
+            "locate workspace root from {}",
+            workspace_start.display()
+        )
+    })?;
+    wire::run_wire(wire::WireArgs {
+        workspace_root,
+        captrack_path,
+    })
+}
+
+fn run_unwire(
+    workspace: Option<PathBuf>,
+    manifest: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use crate::workspace as ws;
+    let workspace_start = workspace.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let workspace_root = ws::find_workspace_root(&workspace_start).with_context(|| {
+        format!(
+            "locate workspace root from {}",
+            workspace_start.display()
+        )
+    })?;
+    wire::run_unwire(wire::UnwireArgs {
+        workspace_root,
+        manifest,
+    })
 }
 
 fn run_apply(

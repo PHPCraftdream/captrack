@@ -34,7 +34,7 @@ default = []
 # Axis 1: telemetry on/off
 # Enables TrackedX wrappers, global registry, and JSON dump.
 # Without this feature all macros expand to bare constructors with zero overhead.
-telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap"]
+telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap", "dep:ctor"]
 
 # Axis 2A: default hasher (select at most one; default = RandomState)
 fxhash     = ["dep:fxhash"]
@@ -58,6 +58,8 @@ captrack-macros = { path = "captrack-macros", version = "0.1.0" }
 scc        = { version = "2.2",  optional = true }
 serde      = { version = "1",    optional = true, features = ["derive"] }
 serde_json = { version = "1",    optional = true }
+# On-exit auto-dump hook (only active with `telemetry`).
+ctor       = { version = "0.2",  optional = true }
 
 # Optional collection deps — callers bring their own; listed here so that
 # off-feature macro expansions can reference the types in doc-examples and

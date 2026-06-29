@@ -9,6 +9,7 @@ mod lint_apply;
 mod lint_instrument;
 mod model;
 mod profile;
+mod wire;
 mod workspace;
 
 fn main() -> anyhow::Result<()> {

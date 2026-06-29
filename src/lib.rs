@@ -90,6 +90,13 @@ pub mod registry;
 
 pub mod dump;
 
+/// On-exit auto-dump of the global registry — only compiled with `telemetry`.
+/// Registers a `#[ctor::dtor]` destructor that writes
+/// `target/captrack-pgo/profile-<binary_stem>.json` after `main` returns.
+/// Suppress with `CAPTRACK_AUTODUMP=0`; override directory with `CAPTRACK_DUMP_DIR`.
+#[cfg(feature = "telemetry")]
+mod autodump;
+
 pub mod stats;
 
 #[cfg(feature = "telemetry")]

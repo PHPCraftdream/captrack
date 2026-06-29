@@ -22,6 +22,11 @@ ignore = "0.4"  # gitignore-aware walk (used by workspace::walk_rust_files)
 sha2 = "0.10"
 tempfile = "3"
 captrack = { path = "..", default-features = false }
+# Used by the `wire` / `unwire` subcommands to patch workspace Cargo.toml files
+# while preserving comments and whitespace.
+toml_edit = "0.22"
+# Used by `wire` to expand workspace `members = ["crates/*"]` glob patterns.
+glob = "0.3"
 
 [dev-dependencies]
 
