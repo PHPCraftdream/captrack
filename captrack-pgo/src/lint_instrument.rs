@@ -273,12 +273,14 @@ pub fn run_lint_instrument(args: LintInstrumentArgs) -> Result<()> {
     if !args.dry_run {
         cmd.arg("--fix");
     }
-    if args.allow_dirty {
-        cmd.arg("--allow-dirty");
-    }
     cmd.arg("--");
     cmd.arg("--manifest-path");
     cmd.arg(&workspace_cargo_toml);
+    // `--allow-dirty` is a cargo-fix flag (consumed by the inner `cargo fix`
+    // invocation, not by `cargo dylint`), so it MUST follow `--`.
+    if args.allow_dirty {
+        cmd.arg("--allow-dirty");
+    }
 
     // Instrument env vars.
     cmd.env("CAPTRACK_PGO_INSTRUMENT", "1");

@@ -498,13 +498,15 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
     if !args.dry_run {
         cmd.arg("--fix");
     }
-    if args.allow_dirty {
-        cmd.arg("--allow-dirty");
-    }
     // Forward to cargo check/fix.
     cmd.arg("--");
     cmd.arg("--manifest-path");
     cmd.arg(&workspace_cargo_toml);
+    // `--allow-dirty` is a cargo-fix flag (consumed by the inner `cargo fix`
+    // invocation, not by `cargo dylint`), so it MUST follow `--`.
+    if args.allow_dirty {
+        cmd.arg("--allow-dirty");
+    }
 
     // Expose the profile path to the lint plugin.
     cmd.env("CAPTRACK_PGO_PROFILE", &abs_profile);
