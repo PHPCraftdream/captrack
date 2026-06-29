@@ -133,6 +133,7 @@ dependencies = [
  "scc",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
 ]
 

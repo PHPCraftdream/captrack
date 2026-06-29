@@ -34,7 +34,7 @@ default = []
 # Axis 1: telemetry on/off
 # Enables TrackedX wrappers, global registry, and JSON dump.
 # Without this feature all macros expand to bare constructors with zero overhead.
-telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap", "dep:ctor"]
+telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap", "dep:ctor", "dep:smallvec"]
 
 # Axis 2A: default hasher (select at most one; default = RandomState)
 fxhash     = ["dep:fxhash"]
@@ -50,6 +50,7 @@ bytes    = ["dep:bytes"]
 indexmap = ["dep:indexmap"]
 dashmap  = ["dep:dashmap"]
 scc      = ["dep:scc"]
+smallvec = ["dep:smallvec"]
 
 [dependencies]
 captrack-macros = { path = "captrack-macros", version = "0.1.0" }
@@ -67,6 +68,7 @@ ctor       = { version = "0.2",  optional = true }
 bytes      = { version = "1",    optional = true }
 indexmap   = { version = "2",    optional = true }
 dashmap    = { version = "6",    optional = true }
+smallvec   = { version = "1",    optional = true }
 
 # Hasher backends (optional, axis 2A)
 fxhash     = { version = "0.2",  optional = true }
@@ -86,6 +88,7 @@ scc        = "2.2"
 bytes      = "1"
 indexmap   = "2"
 dashmap    = "6"
+smallvec   = "1"
 serde_json = "1"
 tempfile   = "3"
 fxhash     = "0.2"

@@ -10,5 +10,8 @@ pub mod per_call_override_tests;
 #[cfg(feature = "telemetry")]
 pub mod on_feature_tests;
 
+#[cfg(feature = "telemetry")]
+pub mod smallvec_tests;
+
 #[cfg(feature = "fxhash")]
 pub mod fxhash_tests;

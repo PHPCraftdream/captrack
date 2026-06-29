@@ -346,3 +346,18 @@ fn tsccset_owned_returns_plain_scc_hashset() {
     let len = s.len();
     assert_eq!(len, 1);
 }
+
+#[test]
+fn tsmallvec_expands_with_capacity() {
+    #[cfg(not(feature = "telemetry"))]
+    {
+        let v: smallvec::SmallVec<[u8; 4]> = tsmallvec!("test/smallvec", 8);
+        assert!(v.capacity() >= 8);
+    }
+    #[cfg(feature = "telemetry")]
+    {
+        let mut v: crate::TrackedSmallVec<[u8; 4]> = tsmallvec!("test/smallvec", 8);
+        v.push(42u8);
+        assert_eq!(v.len(), 1);
+    }
+}

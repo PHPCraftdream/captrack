@@ -11,6 +11,7 @@ pub mod indexset;
 pub mod scc_hashmap;
 pub mod scc_hashset;
 pub mod scc_treeindex;
+pub mod smallvec;
 pub mod vec;
 pub mod vecdeque;
 
@@ -25,5 +26,6 @@ pub use indexset::TrackedIndexSet;
 pub use scc_hashmap::TrackedSccHashMap;
 pub use scc_hashset::TrackedSccHashSet;
 pub use scc_treeindex::TrackedSccTreeIndex;
+pub use smallvec::TrackedSmallVec;
 pub use vec::TrackedVec;
 pub use vecdeque::TrackedVecDeque;

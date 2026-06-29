@@ -124,7 +124,7 @@ pub use stats::SampleStats;
 pub use tracked::{
     TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
     TrackedHashSet, TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet,
-    TrackedSccTreeIndex, TrackedVec, TrackedVecDeque,
+    TrackedSccTreeIndex, TrackedSmallVec, TrackedVec, TrackedVecDeque,
 };
 
 #[cfg(not(feature = "telemetry"))]
@@ -298,6 +298,15 @@ where
     V: Clone + 'static,
 {
     type Inner = ::scc::TreeIndex<K, V>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+#[cfg(any(feature = "smallvec", feature = "telemetry"))]
+impl<A: ::smallvec::Array> IntoInner for ::smallvec::SmallVec<A> {
+    type Inner = ::smallvec::SmallVec<A>;
     #[inline(always)]
     fn into_inner(self) -> Self::Inner {
         self
@@ -1335,6 +1344,40 @@ macro_rules! tscctree {
 // and you want a plain collection at the function boundary without the
 // `.into_inner()` call.
 // ---------------------------------------------------------------------------
+
+// ── tsmallvec! ───────────────────────────────────────────────────────────────
+
+/// Create a `SmallVec<A>` (off-feature) or `TrackedSmallVec<A>` (on-feature)
+/// with the given capacity.
+///
+/// Requires the `smallvec` crate as a direct dependency of your crate.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::tsmallvec;
+/// let mut v = tsmallvec!("my/smallvec", 8);
+/// v.push(42u8);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tsmallvec {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::smallvec::SmallVec::<_>::with_capacity($cap)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tsmallvec {
+    ($name:literal, $cap:expr) => {
+        $crate::TrackedSmallVec::<_>::with_capacity_named($cap, $name, file!(), line!(), column!())
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Tests

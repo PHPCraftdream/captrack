@@ -97,6 +97,12 @@ disallowed-methods = [
     { path = "scc::TreeIndex::new",
       reason = "use captrack::tscctree!(\"name\", cap_hint)" },
 
+    # ── smallvec ──────────────────────────────────────────────────────────────
+    { path = "smallvec::SmallVec::new",
+      reason = "use captrack::tsmallvec!(\"name\", cap)" },
+    { path = "smallvec::SmallVec::with_capacity",
+      reason = "use captrack::tsmallvec!(\"name\", cap)" },
+
     # ── String / &str — NOT banned (user exception). ──────────────────────────
     # String is commonly used for format!/error messages where capacity
     # planning is rarely worthwhile.

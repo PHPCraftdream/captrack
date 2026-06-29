@@ -87,3 +87,6 @@ pub type TrackedSccHashSet<T, S = crate::CapHasher> = ::scc::HashSet<T, S>;
 
 #[cfg(feature = "scc")]
 pub type TrackedSccTreeIndex<K, V> = ::scc::TreeIndex<K, V>;
+
+#[cfg(feature = "smallvec")]
+pub type TrackedSmallVec<A> = ::smallvec::SmallVec<A>;
