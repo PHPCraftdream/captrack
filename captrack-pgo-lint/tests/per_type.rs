@@ -241,12 +241,22 @@ fn run_per_type_test(
         }
     }
 
-    if extra_flags.is_empty() {
-        dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &tmp_dir);
-    } else {
-        dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), &tmp_dir)
-            .rustc_flags(extra_flags)
-            .run();
+    // Panic isolation: catch compiletest panics while `_guard` is still held,
+    // then drop the guard cleanly (no mutex poisoning) before re-raising.
+    // This prevents a failure in one per-type test from cascading into
+    // subsequent tests via a poisoned ENV_MUTEX.
+    let result = std::panic::catch_unwind(|| {
+        if extra_flags.is_empty() {
+            dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &tmp_dir);
+        } else {
+            dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), &tmp_dir)
+                .rustc_flags(extra_flags)
+                .run();
+        }
+    });
+    drop(_guard);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
     }
 }
 
@@ -527,6 +537,41 @@ fn per_type_hashmap_pinned_fx_hasher_no_swap() {
     );
 }
 
+// ── New std types: String, BinaryHeap ────────────────────────────────────────
+
+#[test]
+fn per_type_string_cap() {
+    run_std_type_test(
+        "per_type_string_cap",
+        "string_cap",
+        "String::with_capacity(0)",
+        None,
+    );
+}
+
+#[test]
+fn per_type_binary_heap_cap() {
+    run_std_type_test(
+        "per_type_binary_heap_cap",
+        "binary_heap_cap",
+        "BinaryHeap::<u32>::with_capacity(0)",
+        None,
+    );
+}
+
+// ── New third-party types: hashbrown::HashMap ─────────────────────────────────
+
+#[test]
+fn per_type_hashbrown_map_cap() {
+    run_third_party_type_test(
+        "per_type_hashbrown_map_cap",
+        "hashbrown_map_cap",
+        "hashbrown::HashMap::<u32, u32>::with_capacity(0)",
+        None,
+        &["hashbrown"],
+    );
+}
+
 // ── Verification: non-hashing types do NOT get hasher injected ────────────────
 
 /// Verify that Vec with CAPTRACK_PGO_HASHER=fx still gets capacity-ONLY rewrite
@@ -573,6 +618,28 @@ fn per_type_btreeset_with_hasher_env_still_warn_only() {
         "per_type_btreeset_with_hasher_env_still_warn_only",
         "btreeset_cap",
         "BTreeSet::<u32>::new()",
+        Some("fx"),
+    );
+}
+
+/// String has no hasher — CAPTRACK_PGO_HASHER=fx must not inject a hasher.
+#[test]
+fn per_type_string_with_hasher_env_still_cap_only() {
+    run_std_type_test(
+        "per_type_string_with_hasher_env_still_cap_only",
+        "string_cap",
+        "String::with_capacity(0)",
+        Some("fx"),
+    );
+}
+
+/// BinaryHeap has no hasher — CAPTRACK_PGO_HASHER=fx must not inject a hasher.
+#[test]
+fn per_type_binary_heap_with_hasher_env_still_cap_only() {
+    run_std_type_test(
+        "per_type_binary_heap_with_hasher_env_still_cap_only",
+        "binary_heap_cap",
+        "BinaryHeap::<u32>::with_capacity(0)",
         Some("fx"),
     );
 }

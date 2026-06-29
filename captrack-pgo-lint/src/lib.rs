@@ -128,10 +128,10 @@ pub struct CaptrackPgoCapacity;
 
 // ── TrackedType enum — full 14-type recognition ───────────────────────────────
 
-/// All 14 collection types that captrack can track.
+/// All 17 collection types that captrack can track.
 ///
-/// The first 6 are standard-library types recognised via `get_diagnostic_name`.
-/// The remaining 8 are third-party types recognised via `def_path_str`.
+/// The first 8 are standard-library types recognised via `get_diagnostic_name`.
+/// The remaining 9 are third-party types recognised via `def_path_str`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrackedType {
     // std
@@ -141,6 +141,8 @@ pub(crate) enum TrackedType {
     HashSet,
     BTreeMap,
     BTreeSet,
+    String,
+    BinaryHeap,
     // third-party
     BytesMut,
     IndexMap,
@@ -150,6 +152,7 @@ pub(crate) enum TrackedType {
     SccHashSet,
     SccTreeIndex,
     SmallVec,
+    HashbrownMap,
 }
 
 /// Pure string-match helper for third-party paths.
@@ -203,6 +206,9 @@ pub(crate) fn match_third_party_path(path: &str) -> Option<TrackedType> {
     if path.starts_with("smallvec::") && path.ends_with("SmallVec") {
         return Some(TrackedType::SmallVec);
     }
+    if path.starts_with("hashbrown::") && path.contains("HashMap") && !path.contains("scc") {
+        return Some(TrackedType::HashbrownMap);
+    }
     None
 }
 
@@ -233,9 +239,22 @@ pub(crate) fn recognise_tracked_type(cx: &LateContext<'_>, did: DefId) -> Option
         if diag == sym::BTreeSet {
             return Some(TrackedType::BTreeSet);
         }
+        if diag == sym::String {
+            return Some(TrackedType::String);
+        }
+        if diag == sym::BinaryHeap {
+            return Some(TrackedType::BinaryHeap);
+        }
     }
-    // Step 2 — path-based recognition for third-party types.
+    // Step 2 — path-based recognition.
+    //
+    // `String` is a std type but lacks `#[rustc_diagnostic_item = "String"]`
+    // in nightly-2026-04-16 (the attribute is absent from `alloc::string::String`
+    // in this toolchain).  Fall back to a path match so recognition still works.
     let path = cx.tcx.def_path_str(did);
+    if path == "alloc::string::String" || path == "std::string::String" {
+        return Some(TrackedType::String);
+    }
     match_third_party_path(&path)
 }
 
@@ -248,6 +267,8 @@ pub(crate) fn tracked_type_to_ctor(t: TrackedType) -> Ctor {
         TrackedType::HashSet => Ctor::HashSet,
         TrackedType::BTreeMap => Ctor::BTreeMap,
         TrackedType::BTreeSet => Ctor::BTreeSet,
+        TrackedType::String => Ctor::String,
+        TrackedType::BinaryHeap => Ctor::BinaryHeap,
         TrackedType::BytesMut => Ctor::BytesMut,
         TrackedType::IndexMap => Ctor::IndexMap,
         TrackedType::IndexSet => Ctor::IndexSet,
@@ -256,6 +277,7 @@ pub(crate) fn tracked_type_to_ctor(t: TrackedType) -> Ctor {
         TrackedType::SccHashSet => Ctor::SccHashSet,
         TrackedType::SccTreeIndex => Ctor::SccTreeIndex,
         TrackedType::SmallVec => Ctor::SmallVec,
+        TrackedType::HashbrownMap => Ctor::HashbrownMap,
     }
 }
 
@@ -589,6 +611,8 @@ pub(crate) fn hasher_arg_counts(t: TrackedType) -> Option<(usize, usize)> {
         TrackedType::SccHashMap => Some((2, 3)),
         // scc::HashSet<T, S>    — 1 without hasher, 2 with hasher
         TrackedType::SccHashSet => Some((1, 2)),
+        // hashbrown::HashMap<K, V, S> — 2 without hasher, 3 with hasher
+        TrackedType::HashbrownMap => Some((2, 3)),
         _ => None,
     }
 }
@@ -926,6 +950,10 @@ pub(crate) fn tracked_type_to_static_path(t: TrackedType) -> Option<&'static str
         TrackedType::HashSet => Some("::std::collections::HashSet"),
         // BTreeMap / BTreeSet / SccTreeIndex have no with_capacity.
         TrackedType::BTreeMap | TrackedType::BTreeSet | TrackedType::SccTreeIndex => None,
+        // String has with_capacity.
+        TrackedType::String => Some("::std::string::String"),
+        // BinaryHeap has with_capacity.
+        TrackedType::BinaryHeap => Some("::std::collections::BinaryHeap"),
         TrackedType::BytesMut => Some("::bytes::BytesMut"),
         TrackedType::IndexMap => Some("::indexmap::IndexMap"),
         TrackedType::IndexSet => Some("::indexmap::IndexSet"),
@@ -938,6 +966,8 @@ pub(crate) fn tracked_type_to_static_path(t: TrackedType) -> Option<&'static str
         // usage).  The suggestion is still MachineApplicable only when the
         // target binding has an explicit type annotation.
         TrackedType::SmallVec => Some("::smallvec::SmallVec"),
+        // hashbrown::HashMap has with_capacity.
+        TrackedType::HashbrownMap => Some("::hashbrown::HashMap"),
     }
 }
 
@@ -953,6 +983,7 @@ pub(crate) fn tracked_type_supports_hasher(t: TrackedType) -> bool {
             | TrackedType::DashMap
             | TrackedType::SccHashMap
             | TrackedType::SccHashSet
+            | TrackedType::HashbrownMap
     )
 }
 
@@ -1231,6 +1262,7 @@ fn emit_with_suggestion<'tcx>(
                         | Ctor::DashMap
                         | Ctor::SccHashMap
                         | Ctor::SccHashSet
+                        | Ctor::HashbrownMap
                 )
             });
 
@@ -1726,6 +1758,33 @@ mod tests {
         );
     }
 
+    /// String maps to ::std::string::String.
+    #[test]
+    fn static_path_string() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::String),
+            Some("::std::string::String")
+        );
+    }
+
+    /// BinaryHeap maps to ::std::collections::BinaryHeap.
+    #[test]
+    fn static_path_binary_heap() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::BinaryHeap),
+            Some("::std::collections::BinaryHeap")
+        );
+    }
+
+    /// hashbrown::HashMap maps to ::hashbrown::HashMap.
+    #[test]
+    fn static_path_hashbrown_map() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::HashbrownMap),
+            Some("::hashbrown::HashMap")
+        );
+    }
+
     /// BTreeMap returns None — no with_capacity.
     #[test]
     fn default_default_synthesises_btreemap_warning_only() {
@@ -1761,6 +1820,7 @@ mod tests {
             TrackedType::DashMap,
             TrackedType::SccHashMap,
             TrackedType::SccHashSet,
+            TrackedType::HashbrownMap,
         ] {
             assert!(
                 tracked_type_supports_hasher(t),
@@ -1777,6 +1837,8 @@ mod tests {
             TrackedType::VecDeque,
             TrackedType::BTreeMap,
             TrackedType::BTreeSet,
+            TrackedType::String,
+            TrackedType::BinaryHeap,
             TrackedType::BytesMut,
             TrackedType::SccTreeIndex,
             TrackedType::SmallVec,
@@ -1994,6 +2056,56 @@ mod tests {
         assert_eq!(hasher_arg_counts(TrackedType::SmallVec), None);
     }
 
+    /// String is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_string_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::String), None);
+    }
+
+    /// BinaryHeap is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_binary_heap_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::BinaryHeap), None);
+    }
+
+    /// hashbrown::HashMap requires (2, 3): K, V [, S].
+    #[test]
+    fn hasher_arg_counts_hashbrown_map() {
+        assert_eq!(hasher_arg_counts(TrackedType::HashbrownMap), Some((2, 3)));
+    }
+
+    // ── match_third_party_path: hashbrown recognition ────────────────────────
+
+    /// `hashbrown::HashMap` path → HashbrownMap.
+    #[test]
+    fn hashbrown_map_recognition_via_path() {
+        assert_eq!(
+            match_third_party_path("hashbrown::HashMap"),
+            Some(TrackedType::HashbrownMap),
+            "bare hashbrown::HashMap must map to HashbrownMap"
+        );
+    }
+
+    /// `hashbrown::hash_map::HashMap` (internal module path) → HashbrownMap.
+    #[test]
+    fn hashbrown_map_recognition_internal_module_path() {
+        assert_eq!(
+            match_third_party_path("hashbrown::hash_map::HashMap"),
+            Some(TrackedType::HashbrownMap),
+            "internal-module hashbrown path must still map to HashbrownMap"
+        );
+    }
+
+    /// `hashbrown::` path without `HashMap` → None.
+    #[test]
+    fn hashbrown_non_hashmap_path_returns_none() {
+        assert_eq!(
+            match_third_party_path("hashbrown::HashSet"),
+            None,
+            "hashbrown::HashSet is not tracked — must return None"
+        );
+    }
+
     // ── HasherChoice::hasher_type_path ────────────────────────────────────────
 
     /// Fx hasher_type_path gives the type (not constructor) form.
@@ -2087,7 +2199,7 @@ mod tests {
         );
     }
 
-    // ── Coverage table for hasher_arg_counts (all 14 types) ──────────────────
+    // ── Coverage table for hasher_arg_counts (all 17 types) ──────────────────
 
     /// Every non-hashing tracked type returns None.
     #[test]
@@ -2097,6 +2209,8 @@ mod tests {
             TrackedType::VecDeque,
             TrackedType::BTreeMap,
             TrackedType::BTreeSet,
+            TrackedType::String,
+            TrackedType::BinaryHeap,
             TrackedType::BytesMut,
             TrackedType::SccTreeIndex,
             TrackedType::SmallVec,
@@ -2120,6 +2234,7 @@ mod tests {
             (TrackedType::DashMap, (2, 3)),
             (TrackedType::SccHashMap, (2, 3)),
             (TrackedType::SccHashSet, (1, 2)),
+            (TrackedType::HashbrownMap, (2, 3)),
         ] {
             assert_eq!(
                 hasher_arg_counts(t),

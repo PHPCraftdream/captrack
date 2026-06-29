@@ -149,6 +149,10 @@ pub enum Ctor {
     HashSet,
     BTreeMap,
     BTreeSet,
+    /// `String` — capacity-bearing (like `Vec<u8>` internally).
+    String,
+    /// `BinaryHeap<T>` — capacity-backed max-heap.
+    BinaryHeap,
     // ── third-party ──────────────────────────────────────────────────────────
     BytesMut,
     IndexMap,
@@ -160,6 +164,8 @@ pub enum Ctor {
     SccTreeIndex,
     /// `smallvec::SmallVec` — capacity-backed, uses `with_capacity_named`.
     SmallVec,
+    /// `hashbrown::HashMap` — direct hashbrown dep, capacity-backed.
+    HashbrownMap,
 }
 
 #[cfg(test)]

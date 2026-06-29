@@ -29,6 +29,7 @@ dashmap  = "6"
 fxhash   = "0.2"
 scc      = "2.2"
 smallvec = { version = "1", features = ["write"] }
+hashbrown = "0.15"
 
 [package.metadata.rust-analyzer]
 rustc_private = true

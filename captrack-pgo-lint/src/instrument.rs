@@ -136,6 +136,10 @@ pub(crate) fn tracked_type_to_path(t: TrackedType) -> (&'static str, bool) {
         TrackedType::HashSet => ("::captrack::TrackedHashSet::<_, _>", false),
         TrackedType::BTreeMap => ("::captrack::TrackedBTreeMap::<_, _>", true),
         TrackedType::BTreeSet => ("::captrack::TrackedBTreeSet::<_>", true),
+        // String has no generic args — no turbofish needed.
+        TrackedType::String => ("::captrack::TrackedString", false),
+        // BinaryHeap<T> — one generic arg.
+        TrackedType::BinaryHeap => ("::captrack::TrackedBinaryHeap::<_>", false),
         TrackedType::BytesMut => ("::captrack::TrackedBytesMut", false),
         TrackedType::IndexMap => ("::captrack::TrackedIndexMap::<_, _>", false),
         TrackedType::IndexSet => ("::captrack::TrackedIndexSet::<_>", false),
@@ -144,6 +148,8 @@ pub(crate) fn tracked_type_to_path(t: TrackedType) -> (&'static str, bool) {
         TrackedType::SccHashSet => ("::captrack::TrackedSccHashSet::<_>", false),
         TrackedType::SccTreeIndex => ("::captrack::TrackedSccTreeIndex::<_, _>", true),
         TrackedType::SmallVec => ("::captrack::TrackedSmallVec::<_>", false),
+        // hashbrown::HashMap<K, V, S> — two generic args (K, V); S defaults.
+        TrackedType::HashbrownMap => ("::captrack::TrackedHashbrownMap::<_, _>", false),
     }
 }
 
@@ -156,6 +162,8 @@ fn tracked_type_display(t: TrackedType) -> &'static str {
         TrackedType::HashSet => "HashSet",
         TrackedType::BTreeMap => "BTreeMap",
         TrackedType::BTreeSet => "BTreeSet",
+        TrackedType::String => "String",
+        TrackedType::BinaryHeap => "BinaryHeap",
         TrackedType::BytesMut => "bytes::BytesMut",
         TrackedType::IndexMap => "indexmap::IndexMap",
         TrackedType::IndexSet => "indexmap::IndexSet",
@@ -164,6 +172,7 @@ fn tracked_type_display(t: TrackedType) -> &'static str {
         TrackedType::SccHashSet => "scc::HashSet",
         TrackedType::SccTreeIndex => "scc::TreeIndex",
         TrackedType::SmallVec => "SmallVec",
+        TrackedType::HashbrownMap => "hashbrown::HashMap",
     }
 }
 

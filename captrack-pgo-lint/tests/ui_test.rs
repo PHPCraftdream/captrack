@@ -7,6 +7,23 @@ use std::sync::Mutex;
 /// `compiletest` call, but our `set_var` calls happen *before* that lock.
 /// We use this outer mutex to ensure that env-var mutation and the subsequent
 /// `ui_test` call are atomic from the perspective of the other test thread.
+///
+/// On Windows, `compiletest_rs::run_tests` can `panic!("Some tests failed")`
+/// or trigger an ICE ("pipe has been ended", os error 109) during parallel
+/// test execution.  Such a panic propagates through `dylint_testing::ui_test`
+/// and would normally poison this mutex, causing every subsequent test to fail
+/// with `PoisonError` regardless of its own result.
+///
+/// We guard against both failure modes:
+///
+/// 1. **Poison recovery** — every `.lock()` call uses
+///    `.unwrap_or_else(|e| e.into_inner())` so a poisoned mutex is still
+///    acquirable.
+/// 2. **Panic isolation** — each `dylint_testing::ui_test(…)` call is wrapped
+///    in `std::panic::catch_unwind`.  The panic is caught *while we still hold
+///    `_guard`*, the lock is released cleanly (no poisoning), and then the
+///    panic payload is resumed via `std::panic::resume_unwind`.  This keeps
+///    each test's failure independent and the mutex healthy for other tests.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Generate a combined profile JSON that covers both `detect.rs` and
@@ -172,7 +189,11 @@ fn ui() {
 
     // Take the env mutex to prevent the `instrument` test from clobbering env
     // vars while we are setting up and running this test.
-    let _guard = ENV_MUTEX.lock().unwrap();
+    //
+    // Use `unwrap_or_else(|e| e.into_inner())` so a mutex poisoned by a
+    // previous test's panic (compiletest "pipe ended" / "Some tests failed")
+    // does not cascade into a spurious failure here.
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     // Set the env var so the child compiler process (spawned by compiletest)
     // inherits it.
@@ -186,7 +207,18 @@ fn ui() {
         std::env::set_var("CAPTRACK_PGO_PROFILE", &profile_path);
     }
 
-    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_dir);
+    // Wrap in catch_unwind so that a compiletest panic (e.g. "Some tests
+    // failed", or the Windows "pipe has been ended" ICE) is caught while
+    // `_guard` is still in scope.  The guard is then dropped cleanly — the
+    // mutex is *not* poisoned — and the panic is re-raised afterwards, so
+    // the test still reports FAILED but does not cascade into other tests.
+    let result = std::panic::catch_unwind(|| {
+        dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_dir);
+    });
+    drop(_guard);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 /// Scan `suggest_hasher.rs` for the constructor sites that should have profile
@@ -266,7 +298,8 @@ fn suggest_hasher() {
     std::fs::write(&profile_path, &profile_json).expect("write profile_hasher.json");
 
     // Take the env mutex to prevent other tests from clobbering env vars.
-    let _guard = ENV_MUTEX.lock().unwrap();
+    // Recover from poison — see module-level comment on ENV_MUTEX.
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     unsafe {
         std::env::remove_var("CAPTRACK_PGO_INSTRUMENT");
@@ -274,7 +307,15 @@ fn suggest_hasher() {
         std::env::set_var("CAPTRACK_PGO_HASHER", "fx");
     }
 
-    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_hasher_dir);
+    // Panic isolation: catch compiletest panics, drop the guard cleanly, then
+    // re-raise so the test fails without poisoning ENV_MUTEX.
+    let result = std::panic::catch_unwind(|| {
+        dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_hasher_dir);
+    });
+    drop(_guard);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 #[test]
@@ -284,7 +325,8 @@ fn instrument() {
 
     // Take the env mutex to prevent the `ui` test from clobbering env vars
     // while we are setting up and running this test.
-    let _guard = ENV_MUTEX.lock().unwrap();
+    // Recover from poison — see module-level comment on ENV_MUTEX.
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     // Clear the profile env var (the capacity lint must be a no-op during
     // the instrument pass) and activate the instrument lint.
@@ -297,5 +339,13 @@ fn instrument() {
         std::env::set_var("CAPTRACK_PGO_INSTRUMENT", "1");
     }
 
-    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_instrument_dir);
+    // Panic isolation: catch compiletest panics, drop the guard cleanly, then
+    // re-raise so the test fails without poisoning ENV_MUTEX.
+    let result = std::panic::catch_unwind(|| {
+        dylint_testing::ui_test(env!("CARGO_PKG_NAME"), &ui_instrument_dir);
+    });
+    drop(_guard);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
