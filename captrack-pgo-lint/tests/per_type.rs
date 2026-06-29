@@ -508,6 +508,25 @@ fn per_type_hashmap_ascribed_hasher_fx() {
     );
 }
 
+// ── Phase O: already-fast hasher skip ────────────────────────────────────────
+
+/// HashMap with `fxhash::FxBuildHasher` already pinned in the type
+/// ascription (`HasherPinned + FastKnown`) → capacity-only suggestion with
+/// "already pins a fast hasher" label.  The ascription is NOT rewritten.
+///
+/// This is the core Phase O guard: captrack must not emit a multi-span
+/// hasher swap when the existing hasher is already in the Fx-family.
+#[test]
+fn per_type_hashmap_pinned_fx_hasher_no_swap() {
+    run_third_party_type_test(
+        "per_type_hashmap_pinned_fx_hasher_no_swap",
+        "hashmap_pinned_fx_hasher",
+        "HashMap::with_capacity_and_hasher(0,",
+        Some("fx"),
+        &["fxhash"],
+    );
+}
+
 // ── Verification: non-hashing types do NOT get hasher injected ────────────────
 
 /// Verify that Vec with CAPTRACK_PGO_HASHER=fx still gets capacity-ONLY rewrite

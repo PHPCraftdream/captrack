@@ -439,6 +439,116 @@ pub(crate) fn read_cap_round() -> CapRound {
     })
 }
 
+// ── Phase O: HasherKind — detect already-fast hashers ────────────────────────
+
+/// Set of path substrings (or prefixes) that identify already-fast hashers.
+///
+/// Matched via `contains` on the source snippet of the hasher type argument.
+/// Ordering does not matter — each path is distinct.
+const FAST_HASHER_SNIPPETS: &[&str] = &[
+    // fxhash crate
+    "fxhash::FxBuildHasher",
+    "FxBuildHasher",
+    // rustc_hash crate
+    "rustc_hash::",
+    // ahash crate (its `RandomState` is fast; disambiguation: `ahash::` prefix required)
+    "ahash::",
+    // foldhash crate
+    "foldhash::",
+    // BuildHasherDefault<FxHasher> — catches THasher alias form
+    "FxHasher",
+];
+
+/// Categorise how fast (or slow) an already-pinned hasher type is.
+///
+/// Used by the `HasherPinned` branch in `emit_with_suggestion` to decide
+/// whether to emit a "already fast, skipping swap" message or a generic
+/// "user pinned hasher, skipping swap" message.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum HasherKind {
+    /// `std::collections::hash_map::RandomState` or bare `RandomState`.
+    /// This is the **slow** DOS-safe default — swap would be useful, but
+    /// the user explicitly wrote it.  We still skip the swap (user choice),
+    /// but the label mentions the slow hasher.
+    SlowDefault,
+    /// `fxhash::FxBuildHasher`, `rustc_hash::FxBuildHasher`,
+    /// `ahash::RandomState`, `foldhash::fast::RandomState`,
+    /// `BuildHasherDefault<FxHasher>` (THasher form).
+    /// Already a fast hasher — skip swap, emit an "already fast" label.
+    FastKnown,
+    /// Custom / unrecognised hasher type path.  Conservatively skip swap.
+    Unknown,
+}
+
+/// Classify the hasher type from a **source snippet** of the type argument.
+///
+/// This is a pure string-match function (no HIR context needed) so it is
+/// fully unit-testable.  It is called with the snippet of the hasher's type
+/// argument extracted from the `let` binding's explicit type ascription.
+///
+/// Decision order:
+/// 1. If the snippet contains any of `FAST_HASHER_SNIPPETS` → `FastKnown`.
+/// 2. If the snippet contains `"RandomState"` (without a fast-hasher prefix
+///    such as `"ahash"` or `"foldhash"`) → `SlowDefault`.
+/// 3. Otherwise → `Unknown`.
+///
+/// Note: `ahash::RandomState` hits rule 1 first (contains `"ahash::"`),
+/// so it is classified as `FastKnown`, not `SlowDefault`.
+pub(crate) fn classify_hasher_snippet(snippet: &str) -> HasherKind {
+    let s = snippet.trim();
+    // Rule 1: known fast hashers (checked first so ahash::RandomState
+    // does not fall through to the RandomState slow-default rule).
+    for &fast in FAST_HASHER_SNIPPETS {
+        if s.contains(fast) {
+            return HasherKind::FastKnown;
+        }
+    }
+    // Rule 2: bare RandomState (std's slow default).
+    if s.contains("RandomState") {
+        return HasherKind::SlowDefault;
+    }
+    // Rule 3: unrecognised custom hasher.
+    HasherKind::Unknown
+}
+
+/// Extract the source snippet for the **hasher type argument** from a HIR
+/// type that has been classified as `AscriptionForm::HasherPinned`.
+///
+/// For `HashMap<K, V, S>` the hasher is the last (3rd) non-lifetime generic
+/// arg.  For `HashSet<T, S>` it is the last (2nd) non-lifetime generic arg.
+///
+/// Returns `None` when:
+/// - The HIR type is not a path type.
+/// - There are no generic args (unexpected — callers should have verified
+///   `HasherPinned` first).
+/// - `snippet_opt` fails (virtual or remapped source files).
+fn extract_hasher_arg_snippet<'tcx>(
+    cx: &LateContext<'tcx>,
+    hir_ty: &rustc_hir::Ty<'tcx>,
+) -> Option<String> {
+    let HirTyKind::Path(qpath) = &hir_ty.kind else {
+        return None;
+    };
+    let last_segment = match qpath {
+        QPath::Resolved(_, path) => path.segments.last()?,
+        QPath::TypeRelative(_, segment) => Some(*segment)?,
+    };
+    let generic_args = last_segment.args?;
+    // The hasher is the **last** non-lifetime type arg.
+    let last_type_arg = generic_args
+        .args
+        .iter()
+        .filter(|a| !matches!(a, rustc_hir::GenericArg::Lifetime(_)))
+        .last()?;
+    if let rustc_hir::GenericArg::Type(ty_ref) = last_type_arg {
+        snippet_opt(cx, ty_ref.span)
+    } else {
+        None
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// How the type ascription in a `let` binding specifies (or omits) the hasher
 /// parameter for a hash-keyed collection.
 ///
@@ -1196,7 +1306,29 @@ fn emit_with_suggestion<'tcx>(
                             return;
                         }
                         AscriptionForm::HasherPinned => {
-                            // User explicitly pinned a hasher — respect that, capacity only.
+                            // User explicitly pinned a hasher.
+                            // Phase O: classify it so we can tailor the label.
+                            let hasher_kind = extract_hasher_arg_snippet(cx, hir_ty)
+                                .as_deref()
+                                .map(classify_hasher_snippet)
+                                .unwrap_or(HasherKind::Unknown);
+
+                            let label = match hasher_kind {
+                                HasherKind::FastKnown => format!(
+                                    "use with_capacity({to}) (skipping hasher swap — \
+                                     type ascription already pins a fast hasher)"
+                                ),
+                                HasherKind::SlowDefault => format!(
+                                    "use with_capacity({to}) (skipping hasher swap — \
+                                     type ascription pins RandomState; consider removing \
+                                     the explicit hasher to enable swap)"
+                                ),
+                                HasherKind::Unknown => format!(
+                                    "use with_capacity({to}) (skipping hasher swap — \
+                                     user pinned hasher in type ascription)"
+                                ),
+                            };
+
                             let Some(cap_sugg) =
                                 build_suggestion(cx, fn_expr, method_name, args, to, None)
                             else {
@@ -1208,10 +1340,7 @@ fn emit_with_suggestion<'tcx>(
                                 CAPTRACK_PGO_CAPACITY,
                                 span,
                                 msg,
-                                format!(
-                                    "use with_capacity({to}) (skipping hasher swap — user \
-                                     pinned hasher in type ascription)"
-                                ),
+                                label,
                                 cap_sugg,
                                 base_applicability,
                             );
@@ -1998,5 +2127,144 @@ mod tests {
                 "{t:?} should have hasher arg counts {expected:?}"
             );
         }
+    }
+
+    // ── Phase O: classify_hasher_snippet ─────────────────────────────────────
+    //
+    // Coverage table (locked by spec):
+    //   classify_hasher_kind_random_state_returns_slow
+    //   classify_hasher_kind_fx_returns_fast
+    //   classify_hasher_kind_ahash_returns_fast
+    //   classify_hasher_kind_unknown_custom_returns_unknown
+    //   classify_hasher_kind_build_hasher_default_fx_returns_fast
+
+    /// Bare `RandomState` (std's slow default) → SlowDefault.
+    #[test]
+    fn classify_hasher_kind_random_state_returns_slow() {
+        assert_eq!(
+            classify_hasher_snippet("RandomState"),
+            HasherKind::SlowDefault,
+        );
+    }
+
+    /// Fully-qualified std RandomState → SlowDefault.
+    #[test]
+    fn classify_hasher_kind_std_random_state_returns_slow() {
+        assert_eq!(
+            classify_hasher_snippet("std::collections::hash_map::RandomState"),
+            HasherKind::SlowDefault,
+        );
+    }
+
+    /// `fxhash::FxBuildHasher` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_fx_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("fxhash::FxBuildHasher"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `::fxhash::FxBuildHasher` (fully-rooted path) → FastKnown.
+    #[test]
+    fn classify_hasher_kind_rooted_fx_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("::fxhash::FxBuildHasher"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `rustc_hash::FxBuildHasher` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_rustc_hash_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("rustc_hash::FxBuildHasher"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `ahash::RandomState` → FastKnown (ahash:: prefix wins over RandomState slow rule).
+    #[test]
+    fn classify_hasher_kind_ahash_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("ahash::RandomState"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `::ahash::RandomState` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_rooted_ahash_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("::ahash::RandomState"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `foldhash::fast::RandomState` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_foldhash_fast_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("foldhash::fast::RandomState"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `foldhash::quality::RandomState` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_foldhash_quality_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("foldhash::quality::RandomState"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `BuildHasherDefault<FxHasher>` (THasher alias form) → FastKnown.
+    #[test]
+    fn classify_hasher_kind_build_hasher_default_fx_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("BuildHasherDefault<FxHasher>"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// `std::hash::BuildHasherDefault<fxhash::FxHasher>` → FastKnown.
+    #[test]
+    fn classify_hasher_kind_qualified_build_hasher_default_fx_returns_fast() {
+        assert_eq!(
+            classify_hasher_snippet("std::hash::BuildHasherDefault<fxhash::FxHasher>"),
+            HasherKind::FastKnown,
+        );
+    }
+
+    /// Custom unknown hasher → Unknown.
+    #[test]
+    fn classify_hasher_kind_unknown_custom_returns_unknown() {
+        assert_eq!(
+            classify_hasher_snippet("MyCustomHasher"),
+            HasherKind::Unknown,
+        );
+    }
+
+    /// `SipHasher` → Unknown (not in our fast-hasher set, not RandomState).
+    #[test]
+    fn classify_hasher_kind_siphash_returns_unknown() {
+        assert_eq!(
+            classify_hasher_snippet("SipHasher"),
+            HasherKind::Unknown,
+        );
+    }
+
+    /// Whitespace is trimmed before matching.
+    #[test]
+    fn classify_hasher_kind_trims_whitespace() {
+        assert_eq!(
+            classify_hasher_snippet("  fxhash::FxBuildHasher  "),
+            HasherKind::FastKnown,
+        );
+        assert_eq!(
+            classify_hasher_snippet("  RandomState  "),
+            HasherKind::SlowDefault,
+        );
     }
 }

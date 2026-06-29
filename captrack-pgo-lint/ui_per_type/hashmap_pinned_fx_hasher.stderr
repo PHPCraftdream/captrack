@@ -1,0 +1,15 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/hashmap_pinned_fx_hasher.rs:20:9
+   |
+LL |         HashMap::with_capacity_and_hasher(0, fxhash::FxBuildHasher::default());
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+help: use with_capacity(64) (skipping hasher swap — type ascription already pins a fast hasher)
+   |
+LL -         HashMap::with_capacity_and_hasher(0, fxhash::FxBuildHasher::default());
+LL +         HashMap::with_capacity_and_hasher(64, fxhash::FxBuildHasher::default());
+   |
+
+warning: 1 warning emitted
+
