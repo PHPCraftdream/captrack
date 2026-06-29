@@ -1,0 +1,10 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/hashmap_hasher.rs:11:13
+   |
+LL |     let m = HashMap::<u32, u32>::with_capacity(0);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default()): `HashMap::<u32, u32>::with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default())`
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+
+warning: 1 warning emitted
+

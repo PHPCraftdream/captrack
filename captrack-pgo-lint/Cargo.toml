@@ -22,6 +22,12 @@ serde_json = "1"
 dylint_testing = "6.0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Third-party collection types used by ui_per_type integration tests.
+bytes    = "1"
+indexmap = "2"
+dashmap  = "6"
+scc      = "2.2"
+smallvec = { version = "1", features = ["write"] }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

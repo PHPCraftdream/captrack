@@ -1,0 +1,10 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/smallvec_cap.rs:9:13
+   |
+LL |     let v = smallvec::SmallVec::<[u32; 4]>::with_capacity(0);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use with_capacity(64): `smallvec::SmallVec::<[u32; 4]>::with_capacity(64)`
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+
+warning: 1 warning emitted
+
