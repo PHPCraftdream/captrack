@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 
 use crate::registry;
 use crate::IntoInner;
@@ -71,5 +71,21 @@ impl IntoInner for TrackedBytesMut {
     #[inline]
     fn into_inner(self) -> BytesMut {
         BytesMut::from(self)
+    }
+}
+
+impl TrackedBytesMut {
+    /// Consumes the buffer, returning an immutable `Bytes` handle.
+    ///
+    /// Equivalent to `BytesMut::freeze(self)` but takes ownership of the
+    /// tracker so the final-capacity sample is recorded before the inner
+    /// buffer is sealed.
+    #[inline]
+    pub fn freeze(self) -> Bytes {
+        registry::record_sample(self.file, self.line, self.column, self.inner.capacity());
+        // SAFETY: `self` is owned and forgotten; ptr::read bit-copies `inner`.
+        let inner = unsafe { std::ptr::read(&self.inner) };
+        std::mem::forget(self);
+        inner.freeze()
     }
 }
