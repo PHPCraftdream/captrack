@@ -13,8 +13,11 @@ use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::sym;
 use rustc_errors::Applicability;
-use rustc_hir::{Expr, ExprKind, QPath};
+use rustc_hir::def::Res;
+use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::{Body, BodyId, Expr, ExprKind, HirId, Node, PatKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyKind;
 use rustc_session::declare_lint;
 use rustc_span::Symbol;
@@ -196,14 +199,26 @@ fn check_and_instrument<'tcx>(
         return;
     };
 
+    // Bail out if rewriting this call-site would produce a `TrackedX` value in
+    // a position where the surrounding code expects the bare `X`. `TrackedX`
+    // derefs to `X` for *uses through a reference*, but in by-value contexts
+    // (struct field init, fn return position, fn call argument, tuple field,
+    // anywhere with an explicit `X` type written nearby) the types are
+    // distinct and `cargo fix` would abort the whole crate with `E0308`.
+    //
+    // We adopt a conservative whitelist: only allow rewriting when the parent
+    // HIR node is a `let` binding WITHOUT an explicit type annotation
+    // (`let v = X::new();`). Everything else — type-ascribed let, return,
+    // struct field, function argument, match arm tail, block tail — is
+    // skipped. This is the smallest universally-safe set; the cost is some
+    // missed sites, but each skip is preferable to a per-crate rollback.
+    if !is_safe_instrument_context(cx, call_expr) {
+        return;
+    }
+
     // Compute the "auto:<file>:<line>:<col>" label from the call site.
     let site = span_to_site_key(cx, span);
-    // Use the path as-is (OS-native separators).  On Windows this means
-    // backslashes, which compiletest's normalizer will handle correctly:
-    // the JSON-escaped `\\` form is matched by `normalize_path` and
-    // replaced with `$DIR` before the backslash→slash pass.
-    let file_str = site.file.to_string_lossy();
-    let auto_label = format!("auto:{}:{}:{}", file_str, site.line, site.col);
+    let auto_label = build_auto_label(&site.file, site.line, site.col);
 
     // Build the replacement expression.
     let suggestion = build_instrument_suggestion(
@@ -301,5 +316,500 @@ fn build_instrument_suggestion<'tcx>(
         ))
     } else {
         None
+    }
+}
+
+/// Build the `auto:<file>:<line>:<col>` label that is embedded — wrapped in
+/// double quotes — into a generated suggestion as a Rust string literal.
+///
+/// The path is normalised to forward slashes BEFORE quoting because the label
+/// is inlined verbatim into source: a Windows-native `crates\foo\src\lib.rs`
+/// would emit `"auto:crates\foo\src\lib.rs:42:7"`, where `\f`, `\s`, and `\l`
+/// are invalid Rust character escapes — rustc rejects the entire literal,
+/// `cargo fix` aborts, and the resulting parser confusion cascades into
+/// spurious `E0107` / `E0308` errors in surrounding code, leaving the
+/// workspace untouched.  Normalising to `/` keeps the label valid on every
+/// platform; the real registry key is built from `file!()` / `line!()` /
+/// `column!()` macros expanded at the call site, so the slash flavour in the
+/// label is purely cosmetic.
+pub(crate) fn build_auto_label(file: &std::path::Path, line: u32, col: u32) -> String {
+    let normalised = file.to_string_lossy().replace('\\', "/");
+    format!("auto:{normalised}:{line}:{col}")
+}
+
+/// Verdict from inspecting how a bound variable is **used** after a
+/// `let v = Vec::new();` binding.  See `is_safe_instrument_context` for why
+/// we care, and `classify_parent_kind` for the pattern-by-pattern logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageSafety {
+    /// The usage goes through `Deref` / `DerefMut` / `Index` / `IntoIterator
+    /// for &T` — `TrackedX<T>` transparently substitutes for `X<T>` here,
+    /// because both expose the same auto-deref surface.
+    Safe,
+    /// The usage requires the bare `X<T>` by value (return, struct field
+    /// init, fn call argument, tuple field, assigned-from binding, etc.).
+    /// Replacing the RHS with `TrackedX<T>` would produce `E0308`.
+    Unsafe,
+}
+
+/// Discriminant-only summary of the parent expression around a usage —
+/// purpose-built for unit-testing without constructing real `ExprKind`s.
+///
+/// Translated from `&ExprKind` via `parent_kind_of()` (see below), so we
+/// never depend on the inner field shapes of `ExprKind` variants — those
+/// drift across nightly releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParentKind {
+    /// `usage.method(args)` — usage is the receiver.
+    MethodCallReceiver,
+    /// `recv.method(usage, …)` — usage is one of the argument expressions.
+    MethodCallArg,
+    /// `&usage` / `&mut usage`.
+    AddrOf,
+    /// `usage[i]` or `arr[usage]`.
+    Index,
+    /// `return usage;`.
+    Return,
+    /// `(usage, …)` tuple element.
+    Tuple,
+    /// `Struct { field: usage }`.
+    StructField,
+    /// `func(usage)` or `func(usage, …)`.
+    Call,
+    /// Any other expression position — match scrutinee, cast, block tail,
+    /// `let other = usage`, raw expression statement, etc.  Treated as
+    /// by-value (unsafe) by default.
+    Other,
+}
+
+/// PURE classifier — answers "is this single usage of the bound variable
+/// safe to keep after the binding has changed type from `X` to `TrackedX`?"
+///
+/// Decision is made on the discriminant-only `ParentKind` so this function
+/// is trivially unit-testable.  Receiver / `&`-ref / index positions
+/// deref-coerce and stay safe; everything else (return, struct field init,
+/// fn arg, tuple field, `let other = v`, …) is unsafe.
+pub(crate) fn classify_parent_kind(parent: ParentKind) -> UsageSafety {
+    match parent {
+        // `v.push(x)`, `v.len()`, `v.iter()`, `v.clear()` — receiver position
+        // goes through auto-deref → safe.  By-value receivers like
+        // `v.into_iter()` would actually consume the binding by value and
+        // therefore be unsafe, but the lint cannot tell receiver convention
+        // from the parent kind alone (consumes-self is a property of the
+        // resolved method, not the syntactic shape).  We accept the residual
+        // risk: methods that consume by value are uncommon on collection
+        // variables that were just freshly built with `X::new()` /
+        // `X::with_capacity()` and immediately filled.
+        ParentKind::MethodCallReceiver
+            // `&v`, `&mut v` — deref coercion via `Deref`/`DerefMut`.
+            | ParentKind::AddrOf
+            // `v[i]`, `arr[v]` — `Index`/`IndexMut` traits are forwarded via
+            // `Deref` for `TrackedX`.
+            | ParentKind::Index => UsageSafety::Safe,
+        // Every other position — by-value, type-fixed externally.
+        //   • `return v;`           → ParentKind::Return
+        //   • `S { field: v }`      → ParentKind::StructField
+        //   • `foo(v)`              → ParentKind::Call / MethodCallArg
+        //   • `(v, 0)`              → ParentKind::Tuple
+        //   • `let other = v;`      → ParentKind::Other (init Expr of LetStmt)
+        //   • `match v { … }`       → ParentKind::Other (scrutinee)
+        //   • bare `v` as block tail expression → ParentKind::Other
+        ParentKind::MethodCallArg
+            | ParentKind::Return
+            | ParentKind::Tuple
+            | ParentKind::StructField
+            | ParentKind::Call
+            | ParentKind::Other => UsageSafety::Unsafe,
+    }
+}
+
+/// Translate a real HIR `ExprKind` + receiver-slot bit into the
+/// discriminant-only `ParentKind` consumed by `classify_parent_kind`.
+///
+/// This is the only adapter between the HIR API surface and the pure
+/// classifier; if a future nightly reshuffles `ExprKind` variants, only
+/// this function needs to follow.
+fn parent_kind_of(parent: &ExprKind<'_>, usage_is_receiver: bool) -> ParentKind {
+    match parent {
+        ExprKind::MethodCall(..) => {
+            if usage_is_receiver {
+                ParentKind::MethodCallReceiver
+            } else {
+                ParentKind::MethodCallArg
+            }
+        }
+        ExprKind::AddrOf(..) => ParentKind::AddrOf,
+        ExprKind::Index(..) => ParentKind::Index,
+        ExprKind::Ret(..) => ParentKind::Return,
+        ExprKind::Tup(..) => ParentKind::Tuple,
+        ExprKind::Struct(..) => ParentKind::StructField,
+        ExprKind::Call(..) => ParentKind::Call,
+        _ => ParentKind::Other,
+    }
+}
+
+/// Return `true` only when this call-site is a context where replacing the
+/// bare collection constructor with a `TrackedX::with_capacity_named(...)`
+/// call is guaranteed not to produce an `E0308 mismatched types`.
+///
+/// ## The problem this guards against
+///
+/// `TrackedVec<T>` derefs to `Vec<T>` (and similarly for the other tracked
+/// types), so `v.push(x)` / `&v` / `for x in &v` continue to compile after
+/// the rewrite.  But in *by-value* positions — anywhere the surrounding code
+/// names the bare type as the expected type — the types are distinct and
+/// `cargo fix` aborts the entire crate.
+///
+/// ## Two-level data-flow check
+///
+/// 1. **Parent check.**  The call-site parent must be a `let` binding with
+///    NO explicit type annotation (`let v = X::new();`).  An annotation
+///    immediately pins the variable to `X`, blocking the rewrite.  A non-let
+///    parent is also unsafe — only inside a binding can type inference
+///    propagate the new `TrackedX` type forward.
+///
+/// 2. **Usage walk.**  Find every later reference to the binding in the
+///    enclosing fn body.  Each usage is classified by `classify_usage_kind`;
+///    if any usage is `Unsafe`, the rewrite would break that usage point
+///    (return, struct field, fn arg, …) and the whole site is skipped.
+///
+/// Complex `let` patterns (`let (a, b) = …`, `let Some(v) = …`) are
+/// conservatively rejected — we only handle plain identifier bindings.
+pub(crate) fn is_safe_instrument_context<'tcx>(
+    cx: &LateContext<'tcx>,
+    call_expr: &Expr<'tcx>,
+) -> bool {
+    // Level 1: parent must be a `let v = …;` with no type annotation.
+    let mut parents = cx.tcx.hir_parent_id_iter(call_expr.hir_id);
+    let Some(parent_id) = parents.next() else {
+        return false;
+    };
+    let Node::LetStmt(local) = cx.tcx.hir_node(parent_id) else {
+        return false;
+    };
+    if local.ty.is_some() {
+        return false;
+    }
+
+    // Extract the binding `HirId` from the pattern.  Anything beyond a plain
+    // identifier (tuple destructuring, `mut`, `ref`, struct patterns, etc.)
+    // is rejected — `mut` is fine semantically but the simplest check is
+    // "is this a `Binding(_, hir_id, _, None)` with no sub-pattern?".
+    let binding_hid = match local.pat.kind {
+        PatKind::Binding(_, hir_id, _, None) => hir_id,
+        _ => return false,
+    };
+
+    // Level 2: find the enclosing body and walk for all usages.
+    let Some(body_id) = enclosing_body_id(cx, call_expr.hir_id) else {
+        return false;
+    };
+    let body: &Body<'tcx> = cx.tcx.hir_body(body_id);
+
+    let mut walker = UsageWalker {
+        cx,
+        target: binding_hid,
+        any_unsafe: false,
+    };
+    walker.visit_body(body);
+    !walker.any_unsafe
+}
+
+/// Climb the HIR parent chain from `start` until a node that owns a `Body`
+/// is reached — that body's `BodyId` is what we walk to enumerate usages.
+fn enclosing_body_id<'tcx>(cx: &LateContext<'tcx>, start: HirId) -> Option<BodyId> {
+    for parent_id in cx.tcx.hir_parent_id_iter(start) {
+        match cx.tcx.hir_node(parent_id) {
+            Node::Item(item) => {
+                if let Some(body_id) = item_body(item) {
+                    return Some(body_id);
+                }
+            }
+            Node::ImplItem(item) => {
+                if let Some(body_id) = impl_item_body(item) {
+                    return Some(body_id);
+                }
+            }
+            Node::TraitItem(item) => {
+                if let Some(body_id) = trait_item_body(item) {
+                    return Some(body_id);
+                }
+            }
+            Node::Expr(expr) => {
+                if let ExprKind::Closure(closure) = expr.kind {
+                    return Some(closure.body);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn item_body(item: &rustc_hir::Item<'_>) -> Option<BodyId> {
+    // Only fn bodies — const/static initialisers rarely contain mutable
+    // collection constructions whose binding is later returned/escaped.
+    // The signature of `ItemKind::Const` / `Static` shifts across nightlies;
+    // sidestep that churn.
+    match item.kind {
+        rustc_hir::ItemKind::Fn { body, .. } => Some(body),
+        _ => None,
+    }
+}
+
+fn impl_item_body(item: &rustc_hir::ImplItem<'_>) -> Option<BodyId> {
+    match item.kind {
+        rustc_hir::ImplItemKind::Fn(_, body) => Some(body),
+        _ => None,
+    }
+}
+
+fn trait_item_body(item: &rustc_hir::TraitItem<'_>) -> Option<BodyId> {
+    match item.kind {
+        rustc_hir::TraitItemKind::Fn(_, rustc_hir::TraitFn::Provided(body)) => Some(body),
+        _ => None,
+    }
+}
+
+/// HIR visitor that finds every usage of a specific local binding and
+/// classifies the immediate context.  Sets `any_unsafe = true` on the first
+/// classify-unsafe usage found; the walk continues so the rest of the body
+/// is fully visited (cheap, and lets future debug logs report ALL unsafe
+/// usages rather than just the first).
+struct UsageWalker<'a, 'tcx> {
+    cx: &'a LateContext<'tcx>,
+    target: HirId,
+    any_unsafe: bool,
+}
+
+impl<'tcx> Visitor<'tcx> for UsageWalker<'_, 'tcx> {
+    type NestedFilter = nested_filter::OnlyBodies;
+
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.cx.tcx
+    }
+
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(QPath::Resolved(_, path)) = &expr.kind {
+            if let Res::Local(local_id) = path.res {
+                if local_id == self.target {
+                    // We found a reference to the target binding.  Classify
+                    // by walking ONE step up the parent chain.
+                    if !is_usage_safe(self.cx, expr) {
+                        self.any_unsafe = true;
+                    }
+                    // Do not recurse into the path itself — nothing to find.
+                    return;
+                }
+            }
+        }
+        intravisit::walk_expr(self, expr);
+    }
+}
+
+/// Classify a single usage by inspecting its HIR parent.  Returns `false`
+/// when the usage is unsafe (would break compilation after the binding's
+/// RHS becomes `TrackedX`).
+fn is_usage_safe<'tcx>(cx: &LateContext<'tcx>, usage_expr: &Expr<'tcx>) -> bool {
+    let mut parents = cx.tcx.hir_parent_id_iter(usage_expr.hir_id);
+    let Some(parent_id) = parents.next() else {
+        return false;
+    };
+    let parent_node = cx.tcx.hir_node(parent_id);
+    let Node::Expr(parent_expr) = parent_node else {
+        // Parent is a Stmt / Block / Let / Item — bare value position.
+        // The only safe non-Expr parent would be a `let _ = v;` "drop"
+        // pattern, but accepting that would require an extra case.  Stay
+        // strict — non-Expr parent → unsafe.
+        return false;
+    };
+
+    // Determine whether this usage occupies the receiver slot of a method
+    // call (the only context where method-call parent doesn't mean by-value).
+    let is_receiver = matches!(
+        &parent_expr.kind,
+        ExprKind::MethodCall(_, recv, _, _) if recv.hir_id == usage_expr.hir_id
+    );
+
+    let parent_kind = parent_kind_of(&parent_expr.kind, is_receiver);
+    classify_parent_kind(parent_kind) == UsageSafety::Safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_auto_label;
+    use std::path::PathBuf;
+
+    /// The label MUST NOT contain backslashes — they are invalid char-escape
+    /// triggers in a Rust string literal.  See the function-level doc on
+    /// `build_auto_label` for the failure mode.
+    #[test]
+    fn windows_backslashes_normalised_to_forward_slashes() {
+        let path: PathBuf = ["crates", "shamir-server", "src", "lib.rs"].iter().collect();
+        // On Windows `path` builds with `\`; on Linux with `/`.  Force the
+        // backslash flavour by constructing the string manually so the test
+        // exercises the same input shape on both targets.
+        let win_path = PathBuf::from(r"crates\shamir-server\src\lib.rs");
+        let label = build_auto_label(&win_path, 42, 7);
+        assert!(
+            !label.contains('\\'),
+            "label must not retain backslashes: got {label:?}"
+        );
+        assert_eq!(label, "auto:crates/shamir-server/src/lib.rs:42:7");
+        // Sanity: the PathBuf variant produces the same output on either OS.
+        let _ = build_auto_label(&path, 42, 7);
+    }
+
+    #[test]
+    fn unix_paths_are_passed_through_unchanged() {
+        let p = PathBuf::from("crates/shamir-server/src/lib.rs");
+        assert_eq!(
+            build_auto_label(&p, 100, 3),
+            "auto:crates/shamir-server/src/lib.rs:100:3"
+        );
+    }
+
+    /// Mixed separators (e.g. a tool that mangled a path part-way) — every
+    /// backslash must be flipped, not just the leading one.
+    #[test]
+    fn mixed_separators_all_normalised() {
+        let p = PathBuf::from(r"crates/shamir-engine\src/lib.rs");
+        let label = build_auto_label(&p, 1, 1);
+        assert!(!label.contains('\\'), "got {label:?}");
+        assert_eq!(label, "auto:crates/shamir-engine/src/lib.rs:1:1");
+    }
+
+    /// The literal we emit must parse as a valid Rust string literal.  The
+    /// only character we need to defend against is `\` (every Rust escape
+    /// trigger starts with it); double-quote and CR/LF cannot appear in a
+    /// file path on the platforms we target.
+    #[test]
+    fn label_is_a_valid_rust_string_literal() {
+        let tricky_inputs = [
+            r"crates\foo\bar.rs",
+            r"a\b\c\d\e\f\g.rs", // every escape-trigger letter pre-/post-fixed
+            r"with space\foo.rs",
+        ];
+        for input in tricky_inputs {
+            let label = build_auto_label(&PathBuf::from(input), 1, 1);
+            assert!(
+                !label.contains('\\'),
+                "label {label:?} would break as a Rust string literal"
+            );
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // classify_parent_kind — pure, discriminant-only, table-driven.
+    //
+    // The classifier acts ONLY on the `ParentKind` enum, so unit tests can
+    // exhaustively enumerate every variant without touching real HIR.  The
+    // adapter `parent_kind_of` (HIR ExprKind → ParentKind) is exercised
+    // indirectly through the real-workspace `captrack-pgo instrument` run.
+    // ──────────────────────────────────────────────────────────────────────
+    use super::{classify_parent_kind, ParentKind, UsageSafety};
+
+    #[test]
+    fn safe_when_used_as_method_call_receiver() {
+        // `v.push(x)`, `v.len()`, `for x in &v` (which lowers to `(&v).into_iter()`).
+        assert_eq!(
+            classify_parent_kind(ParentKind::MethodCallReceiver),
+            UsageSafety::Safe
+        );
+    }
+
+    #[test]
+    fn unsafe_when_used_as_method_call_argument() {
+        // `other.takes_vec(v)` — usage is in the args slice, not receiver.
+        assert_eq!(
+            classify_parent_kind(ParentKind::MethodCallArg),
+            UsageSafety::Unsafe
+        );
+    }
+
+    #[test]
+    fn safe_when_used_via_addr_of() {
+        // `&v`, `&mut v` — `Deref` / `DerefMut` coercion handles it.
+        assert_eq!(classify_parent_kind(ParentKind::AddrOf), UsageSafety::Safe);
+    }
+
+    #[test]
+    fn safe_when_used_via_index() {
+        // `v[i]`, `arr[v]` — `Index` / `IndexMut` forwarded via `Deref`.
+        assert_eq!(classify_parent_kind(ParentKind::Index), UsageSafety::Safe);
+    }
+
+    #[test]
+    fn unsafe_when_returned_by_value() {
+        // `return v;` — by-value, but the binding is `TrackedX` after rewrite.
+        assert_eq!(
+            classify_parent_kind(ParentKind::Return),
+            UsageSafety::Unsafe
+        );
+    }
+
+    #[test]
+    fn unsafe_when_tuple_field() {
+        // `(v, 0)` — by-value into tuple.
+        assert_eq!(classify_parent_kind(ParentKind::Tuple), UsageSafety::Unsafe);
+    }
+
+    #[test]
+    fn unsafe_when_function_call_argument() {
+        // `foo(v)` — first positional arg, by-value.
+        assert_eq!(classify_parent_kind(ParentKind::Call), UsageSafety::Unsafe);
+    }
+
+    #[test]
+    fn unsafe_when_struct_field_init() {
+        // `S { vec: v }` — struct field, by-value.
+        assert_eq!(
+            classify_parent_kind(ParentKind::StructField),
+            UsageSafety::Unsafe
+        );
+    }
+
+    #[test]
+    fn unsafe_when_other_position() {
+        // Match scrutinee, cast, bare block tail, `let other = v`, etc.  All
+        // by-value.  The catch-all bucket MUST default to Unsafe — that is
+        // the load-bearing safety contract of this lint.
+        assert_eq!(classify_parent_kind(ParentKind::Other), UsageSafety::Unsafe);
+    }
+
+    /// Property: exactly three ParentKinds are Safe; everything else is
+    /// Unsafe.  Encoded as an explicit table so a future contributor who
+    /// adds a `ParentKind` variant either deliberately classifies it (and
+    /// adds the row) or fails the test — preventing silent expansion of
+    /// the "safe" set.
+    #[test]
+    fn coverage_table_locks_the_safety_classification() {
+        let cases = [
+            (ParentKind::MethodCallReceiver, UsageSafety::Safe),
+            (ParentKind::MethodCallArg, UsageSafety::Unsafe),
+            (ParentKind::AddrOf, UsageSafety::Safe),
+            (ParentKind::Index, UsageSafety::Safe),
+            (ParentKind::Return, UsageSafety::Unsafe),
+            (ParentKind::Tuple, UsageSafety::Unsafe),
+            (ParentKind::StructField, UsageSafety::Unsafe),
+            (ParentKind::Call, UsageSafety::Unsafe),
+            (ParentKind::Other, UsageSafety::Unsafe),
+        ];
+        for (parent, expected) in cases {
+            assert_eq!(
+                classify_parent_kind(parent),
+                expected,
+                "regression: {parent:?} classification changed"
+            );
+        }
+        let safe_count = cases
+            .iter()
+            .filter(|(_, s)| matches!(s, UsageSafety::Safe))
+            .count();
+        assert_eq!(
+            safe_count, 3,
+            "exactly three ParentKinds (MethodCallReceiver, AddrOf, Index) are Safe; \
+             a change here means someone added a new Safe path — review it carefully"
+        );
     }
 }
