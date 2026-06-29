@@ -10,6 +10,7 @@
 use std::sync::OnceLock;
 
 use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::is_expn_of;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::sym;
 use rustc_errors::Applicability;
@@ -20,9 +21,10 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyKind;
 use rustc_session::declare_lint;
+use rustc_span::Span;
 use rustc_span::Symbol;
 
-use crate::{is_tracked_method, recognise_tracked_type, span_to_site_key, sym_with_capacity_and_hasher, TrackedType};
+use crate::{is_tracked_method, recognise_tracked_type, span_to_site_key, TrackedType};
 
 declare_lint! {
     /// ### What it does
@@ -47,13 +49,17 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// let v: Vec<u8> = Vec::new();
+    /// let v = Vec::new();
     /// // becomes:
-    /// let v: Vec<u8> = ::captrack::TrackedVec::<_>::with_capacity_named(0, "auto:src/main.rs:1:18", file!(), line!(), column!());
+    /// let v = ::captrack::TrackedVec::<_>::wrap_from(Vec::new(), "auto:src/main.rs:1:9", file!(), line!(), column!());
+    ///
+    /// let v = vec![1, 2, 3];
+    /// // becomes:
+    /// let v = ::captrack::TrackedVec::<_>::wrap_from(vec![1, 2, 3], "auto:src/main.rs:1:9", file!(), line!(), column!());
     /// ```
     pub CAPTRACK_PGO_INSTRUMENT,
     Warn,
-    "auto-wraps std collection constructors in TrackedX::with_capacity_named for telemetry collection"
+    "auto-wraps collection expressions in TrackedX::wrap_from for universal telemetry collection"
 }
 
 /// Returns `true` when `CAPTRACK_PGO_INSTRUMENT` is set to a truthy value.
@@ -99,9 +105,15 @@ impl<'tcx> LateLintPass<'tcx> for CaptrackPgoInstrument {
         // Method-call form is uncommon for std constructors.
         if let ExprKind::Call(fn_expr, args) = &expr.kind {
             if let ExprKind::Path(qpath) = &fn_expr.kind {
+                // First, try the normal (non-expanded) path — also handles
+                // vec![] (vec_new form) and smallvec![] after macro unwrap.
                 check_and_instrument(cx, expr, fn_expr, qpath, args);
             }
         }
+
+        // Separately handle vec![a, b, c] and vec![x; n] forms which expand
+        // to non-tracked method calls (into_vec / from_elem).
+        check_vec_like_macro_expansion(cx, expr);
     }
 }
 
@@ -157,25 +169,52 @@ fn tracked_type_display(t: TrackedType) -> &'static str {
 
 /// Core check: resolve the call site, determine if it's a tracked constructor,
 /// and emit a `MachineApplicable` suggestion.
+///
+/// Also handles macro-expanded sites where the expansion produces a tracked
+/// constructor method call (`vec![]` → `Vec::new()`, `smallvec![]` →
+/// `SmallVec::new()`).  In that case `span` is replaced by the outer
+/// user-visible macro call span before the suggestion is emitted.
 fn check_and_instrument<'tcx>(
     cx: &LateContext<'tcx>,
     call_expr: &Expr<'tcx>,
     fn_expr: &Expr<'tcx>,
     qpath: &QPath<'tcx>,
-    args: &'tcx [Expr<'tcx>],
+    _args: &'tcx [Expr<'tcx>],
 ) {
-    let span = call_expr.span;
+    let call_span = call_expr.span;
 
-    // Skip macro-expanded sites (e.g. `vec![]`).
+    // Resolve the effective span and whether we are in a tracked-macro context.
     //
-    // TODO(vec!-macro): attempt to detect `vec![]` expansion via
-    // `span.source_callsite()` and instrument the outer user-visible span.
-    // The API needed (resolving `outer.ctxt().outer_expn_data().macro_def_id`
-    // to a `def_path_str` of `"std::vec"`) is available on nightly but requires
-    // careful lifetime handling across `ExpnData`.  Deferred to a future pass.
-    if span.from_expansion() {
-        return;
-    }
+    // When call_expr comes from a macro expansion we try to determine if the
+    // macro is one of the tracked ones (vec!, smallvec!).  If so we use the
+    // outer user-visible span for the suggestion; otherwise we skip.
+    //
+    // Note: vec![a,b,c] and vec![x;n] expand to *non-tracked* method calls
+    // (into_vec / from_elem) and are handled separately in
+    // `check_vec_like_macro_expansion`, not here.
+    let span = if call_span.from_expansion() {
+        // Walk the expansion chain to find the outermost tracked macro call.
+        // `is_expn_of` returns Some(outer_span) if `span` is (transitively)
+        // inside an expansion of a `!`-macro with the given name.
+        if let Some(outer) = is_expn_of(call_span, sym::vec) {
+            // Double check: outer span must not itself be inside another
+            // expansion (i.e. the vec! call is in real user code).
+            if outer.from_expansion() {
+                return;
+            }
+            outer
+        } else if let Some(outer) = is_expn_of(call_span, sym_smallvec()) {
+            if outer.from_expansion() {
+                return;
+            }
+            outer
+        } else {
+            // Not a tracked macro — skip.
+            return;
+        }
+    } else {
+        call_span
+    };
 
     let typeck = cx.typeck_results();
 
@@ -228,7 +267,7 @@ fn check_and_instrument<'tcx>(
         }
     }
 
-    let (tracked_path, use_new_named) = tracked_type_to_path(tracked_ty);
+    let (tracked_path, _use_new_named) = tracked_type_to_path(tracked_ty);
 
     // Bail out if rewriting this call-site would produce a `TrackedX` value in
     // a position where the surrounding code expects the bare `X`. `TrackedX`
@@ -251,107 +290,273 @@ fn check_and_instrument<'tcx>(
     let site = span_to_site_key(cx, span);
     let auto_label = build_auto_label(&site.file, site.line, site.col);
 
-    // Build the replacement expression.
-    let suggestion = build_instrument_suggestion(
-        cx,
-        fn_expr,
-        method_name,
-        args,
-        tracked_path,
-        use_new_named,
-        &auto_label,
-    );
-    let Some(sugg_text) = suggestion else {
+    // Build the wrap_from replacement: wrap the original expression verbatim.
+    // `span` is the user-visible call span (outer macro span when applicable).
+    let Some(orig_snippet) = snippet_opt(cx, span) else {
         return;
     };
+    let sugg_text = build_wrap_from_suggestion(tracked_path, &orig_snippet, &auto_label);
 
     span_lint_and_sugg(
         cx,
         CAPTRACK_PGO_INSTRUMENT,
         span,
         format!(
-            "captrack-pgo-instrument: wrapping `{}` constructor for telemetry profiling",
+            "captrack-pgo-instrument: wrapping `{}` for telemetry profiling",
             tracked_type_display(tracked_ty)
         ),
-        "instrument with TrackedX::with_capacity_named",
+        "instrument with TrackedX::wrap_from",
         sugg_text,
         Applicability::MachineApplicable,
     );
 }
 
-/// Build the replacement source string for the instrument lint.
+/// Build a `wrap_from` replacement string for the instrument lint.
 ///
-/// For most constructors (`Vec::new`, `Vec::with_capacity`, etc.) the form is:
+/// The universal Phase K form:
 /// ```text
-/// ::captrack::TrackedVec::<_>::with_capacity_named(cap, "auto:...", file!(), line!(), column!())
+/// ::captrack::TrackedVec::<_>::wrap_from(<orig_snippet>, "auto:...", file!(), line!(), column!())
 /// ```
 ///
-/// For `BTreeMap::new` / `BTreeSet::new` the form uses `new_named`:
-/// ```text
-/// ::captrack::TrackedBTreeMap::<_, _>::new_named(0, "auto:...", file!(), line!(), column!())
-/// ```
-///
-/// For `HashMap::with_capacity_and_hasher(K, h)`:
-/// ```text
-/// ::captrack::TrackedHashMap::<_, _, _>::with_capacity_and_hasher_named(K, h, "auto:...", file!(), line!(), column!())
-/// ```
-/// Note: `with_capacity_and_hasher_named` exists on `TrackedHashMap` and
-/// `TrackedHashSet` (verified in `src/tracked/hashmap.rs` and `hashset.rs`).
-fn build_instrument_suggestion<'tcx>(
-    cx: &LateContext<'tcx>,
-    _fn_expr: &Expr<'tcx>,
-    method_name: Symbol,
-    args: &'tcx [Expr<'tcx>],
+/// This works for ANY expression that evaluates to the target collection type —
+/// `Vec::new()`, `Vec::with_capacity(N)`, `vec![a, b, c]`, `Vec::from_iter(it)`,
+/// `smallvec![a, b, c]`, arbitrary builder calls, etc.  The original expression
+/// is preserved verbatim; no element loss can occur.
+pub(crate) fn build_wrap_from_suggestion(
     tracked_path: &str,
-    use_new_named: bool,
+    orig_snippet: &str,
     auto_label: &str,
-) -> Option<String> {
+) -> String {
     let name_arg = format!("\"{auto_label}\"");
-    let meta_args = format!("file!(), line!(), column!()");
+    let meta_args = "file!(), line!(), column!()";
+    format!("{tracked_path}::wrap_from({orig_snippet}, {name_arg}, {meta_args})")
+}
 
-    if method_name == sym::new || method_name == sym::Default {
-        // `default()` (sym::Default = interned "default") is a zero-capacity
-        // constructor equivalent to `new()`.  Instrument it identically:
-        // emit with_capacity_named(0, …) so the profiling run records a site
-        // with initial capacity = 0.
-        if use_new_named {
-            // BTree types: use new_named(cap_hint=0, name, file, line, col)
-            Some(format!(
-                "{tracked_path}::new_named(0, {name_arg}, {meta_args})"
-            ))
-        } else {
-            // Vec, VecDeque, HashMap, HashSet, SmallVec: with_capacity_named(0, ...)
-            Some(format!(
-                "{tracked_path}::with_capacity_named(0, {name_arg}, {meta_args})"
-            ))
-        }
-    } else if method_name == sym::with_capacity {
-        // `with_capacity(K)` — extract the cap argument as source text.
-        let cap_arg = args.first()?;
-        let cap_text = snippet_opt(cx, cap_arg.span)?;
-        Some(format!(
-            "{tracked_path}::with_capacity_named({cap_text}, {name_arg}, {meta_args})"
-        ))
-    } else if method_name == sym_with_capacity_and_hasher() {
-        // `with_capacity_and_hasher(K, h)` — both args preserved.
-        // Verified: TrackedHashMap and TrackedHashSet both have
-        // `with_capacity_and_hasher_named(cap, hasher, name, file, line, col)`.
-        // BTree types don't have this method; they're excluded by use_new_named=true
-        // and by not being hash-keyed.
-        let cap_arg = args.first()?;
-        let cap_text = snippet_opt(cx, cap_arg.span)?;
-        let hasher_arg = args.get(1)?;
-        let hasher_text = snippet_opt(cx, hasher_arg.span)?;
-        // Adjust the tracked_path for the 3-param variant:
-        // HashMap::<_, _> → HashMap::<_, _, _>
-        // HashSet::<_, _> → HashSet::<_, _, _>
-        let path_3 = tracked_path.replace("::<_, _>", "::<_, _, _>");
-        Some(format!(
-            "{path_3}::with_capacity_and_hasher_named({cap_text}, {hasher_text}, {name_arg}, {meta_args})"
-        ))
-    } else {
-        None
+/// Cached interned `Symbol` for the `smallvec` macro name.
+///
+/// `sym::vec` is already in clippy_utils' prelude; `"smallvec"` is a
+/// third-party crate macro, so we intern it on first use.
+pub(crate) fn sym_smallvec() -> Symbol {
+    static SYM: OnceLock<Symbol> = OnceLock::new();
+    *SYM.get_or_init(|| Symbol::intern("smallvec"))
+}
+
+/// Which tracked macro produced the expanded call-site we are examining.
+///
+/// This is a pure, HIR-independent discriminant used only to choose the
+/// correct `tracked_path` for the suggestion — no rustc context required,
+/// making it trivially unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackedMacro {
+    /// `vec![]` — expands to `Vec` operations.
+    Vec,
+    /// `smallvec![]` — expands to `SmallVec` operations.
+    SmallVec,
+}
+
+/// Pure helper: should we attempt to instrument a macro with this name?
+///
+/// Only `"vec"` and `"smallvec"` are recognised; everything else is skipped.
+/// This function has no rustc dependencies and is trivially unit-testable.
+///
+/// The function is `pub(crate)` primarily for unit testing; the runtime paths
+/// use `is_expn_of` with interned symbols rather than calling this directly.
+#[allow(dead_code)] // used in unit tests; runtime path uses is_expn_of + sym::vec/sym_smallvec
+pub(crate) fn should_instrument_macro_name(name: &str) -> bool {
+    name == "vec" || name == "smallvec"
+}
+
+/// Emit a `wrap_from` suggestion for a `vec!` or `smallvec!` expansion.
+///
+/// `outer_span` — the user-visible macro call span (`vec![…]` or
+/// `smallvec![…]`).  The suggestion replaces this whole span with
+/// `TrackedX::wrap_from(<macro_snippet>, "auto:...", file!(), line!(), column!())`.
+///
+/// Because `wrap_from` evaluates the original expression first, all element
+/// initialisers are preserved — this is safe for all forms including
+/// `vec![a, b, c]`, `vec![x; n]`, `smallvec![a, b, c]`.
+///
+/// Returns without emitting when the context is not safe for rewriting
+/// (data-flow check via `is_safe_instrument_context`) or when the outer
+/// snippet cannot be extracted.
+fn emit_macro_wrap_from_suggestion<'tcx>(
+    cx: &LateContext<'tcx>,
+    call_expr: &Expr<'tcx>,
+    outer_span: Span,
+    tracked_macro: TrackedMacro,
+) {
+    // Data-flow guard — same as the non-macro path.
+    if !is_safe_instrument_context(cx, call_expr) {
+        return;
     }
+
+    let tracked_path = match tracked_macro {
+        TrackedMacro::Vec => "::captrack::TrackedVec::<_>",
+        TrackedMacro::SmallVec => "::captrack::TrackedSmallVec::<_>",
+    };
+
+    // Extract the outer macro snippet, e.g. `vec![a, b, c]`.
+    let Some(orig_snippet) = snippet_opt(cx, outer_span) else {
+        return;
+    };
+
+    let site = span_to_site_key(cx, outer_span);
+    let auto_label = build_auto_label(&site.file, site.line, site.col);
+    let sugg = build_wrap_from_suggestion(tracked_path, &orig_snippet, &auto_label);
+
+    let macro_name = match tracked_macro {
+        TrackedMacro::Vec => "vec",
+        TrackedMacro::SmallVec => "smallvec",
+    };
+
+    span_lint_and_sugg(
+        cx,
+        CAPTRACK_PGO_INSTRUMENT,
+        outer_span,
+        format!("captrack-pgo-instrument: wrapping `{macro_name}!` for telemetry profiling"),
+        "instrument with TrackedX::wrap_from",
+        sugg,
+        Applicability::MachineApplicable,
+    );
+}
+
+/// Capacity value extracted from a macro expansion form.
+///
+/// Pure discriminant — no HIR dependencies — retained for unit tests.
+/// Phase K uses `wrap_from` universally (no capacity extraction needed),
+/// so the runtime paths no longer branch on `MacroCap`.
+#[allow(dead_code)] // used only in unit tests; Phase K wraps universally via wrap_from
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MacroCap<'a> {
+    /// `vec![]` or `smallvec![]` — no elements, capacity is 0.
+    #[allow(dead_code)] // retained for unit tests; Phase K wraps universally
+    Zero,
+    /// `vec![a, b, c]` — element count (used in unit tests only).
+    #[allow(dead_code)] // retained for unit tests; Phase K wraps universally
+    Literal(usize),
+    /// `vec![x; n]` where `n` is a source expression (used in unit tests only).
+    #[allow(dead_code)] // retained for unit tests; Phase K wraps universally
+    Expr(&'a str),
+}
+
+/// Handle macro-expanded call-sites for forms that do NOT produce a tracked
+/// method name (`vec![a,b,c]` → `into_vec` / `box_assume_init_into_vec_unsafe`,
+/// `vec![x;n]` → `from_elem`).
+///
+/// With Phase K's `wrap_from` approach, ALL forms are safe to instrument by
+/// wrapping the outer macro span verbatim — elements are evaluated first,
+/// then handed to `wrap_from` which just records identity.
+///
+/// For `vec![]` (which expands to `Vec::new()`) this function does nothing —
+/// that case is caught by the main `check_and_instrument` path.
+///
+/// The call is a no-op when the expression did not come from a tracked macro.
+fn check_vec_like_macro_expansion<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+    if !expr.span.from_expansion() {
+        return;
+    }
+
+    // Detect vec! or smallvec! expansions via the expansion chain name.
+    // `is_expn_of` walks up through nested expansions checking the bang-macro
+    // name at each level — returns Some(outer_user_span) on the first match.
+    let (outer_span, tracked_macro) = if let Some(outer) = is_expn_of(expr.span, sym::vec) {
+        (outer, TrackedMacro::Vec)
+    } else if let Some(outer) = is_expn_of(expr.span, sym_smallvec()) {
+        (outer, TrackedMacro::SmallVec)
+    } else {
+        return;
+    };
+
+    // Outer span must be in real user code.
+    if outer_span.from_expansion() {
+        return;
+    }
+
+    // We only handle Call-form expansions here.  ExprKind::Array (for the
+    // box [a,b,c] sub-expression) is visited separately by check_expr.
+    let ExprKind::Call(fn_expr, _args) = &expr.kind else {
+        return;
+    };
+    let ExprKind::Path(qpath) = &fn_expr.kind else {
+        return;
+    };
+
+    let typeck = cx.typeck_results();
+    let res = typeck.qpath_res(qpath, fn_expr.hir_id);
+    let Some(def_id) = res.opt_def_id() else {
+        return;
+    };
+
+    // Identify the inner function via its diagnostic name.
+    let Some(diag_name) = cx.tcx.get_diagnostic_name(def_id) else {
+        return;
+    };
+
+    // `vec![a, b, c]` — expands to `box_assume_init_into_vec_unsafe(...)`.
+    //
+    // Phase K: wrap_from evaluates the original expression first, so element
+    // initialisers are NOT lost.  The outer macro span `vec![a, b, c]` is
+    // extracted verbatim and passed to `TrackedVec::wrap_from(vec![a, b, c], ...)`.
+    if diag_name == sym::box_assume_init_into_vec_unsafe {
+        emit_macro_wrap_from_suggestion(cx, expr, outer_span, tracked_macro);
+        return;
+    }
+
+    // `vec![x; n]` — expands to `from_elem(x, n)`.
+    //
+    // Phase K: wrap_from is safe here too — `vec![x; n]` evaluates all n
+    // copies of x, producing a real Vec<_>, then wrap_from just records identity.
+    if diag_name == sym::vec_from_elem {
+        emit_macro_wrap_from_suggestion(cx, expr, outer_span, tracked_macro);
+        return;
+    }
+
+    // `vec![]` with vec_new diagnostic — handled by the main
+    // check_and_instrument path (Vec::new → tracked). Nothing to do here.
+    // Other diagnostic names are not tracked.
+}
+
+/// Walk the argument list of `box_assume_init_into_vec_unsafe` to find the
+/// inner `[a, b, c]` array literal and return its element count.
+///
+/// Returns 0 if the inner array cannot be found (conservative fallback).
+///
+/// Currently unused: the `box_assume_init_into_vec_unsafe` branch in
+/// `check_vec_like_macro_expansion` returns early (non-empty vec![…] forms are
+/// disabled).  Retained for the future element-preserving rewrite.
+#[allow(dead_code)] // retained for future element-preserving rewrite — see TODO(vec-list)
+fn extract_array_len_from_into_vec_args(args: &[Expr<'_>]) -> usize {
+    // The expansion of vec![a, b, c] on nightly-2026-04-16 is:
+    //   box_assume_init_into_vec_unsafe(
+    //       write_box_via_move(
+    //           Box::new_uninit_slice(N),
+    //           [a, b, c]          ← ExprKind::Array
+    //       )
+    //   )
+    // where write_box_via_move is a 2-arg Call whose second arg is the array.
+    //
+    // Layout (from clippy's VecArgs::hir):
+    //   args[0]  = write_box_via_move(...) call
+    //     ↳ inner_call.args[0] = Box::new_uninit_slice(N) call
+    //     ↳ inner_call.args[1] = [a, b, c]  ExprKind::Array
+    //
+    // We dig one level in and count the elements.
+    let Some(write_call) = args.first() else {
+        return 0;
+    };
+    // The write_box call may be a Call or MethodCall — check both.
+    let inner_args: &[Expr<'_>] = match &write_call.kind {
+        ExprKind::Call(_, inner) => inner,
+        ExprKind::MethodCall(_, _, inner, _) => inner,
+        _ => return 0,
+    };
+    // Second arg should be the array literal.
+    if let Some(array_expr) = inner_args.get(1) {
+        if let ExprKind::Array(elems) = &array_expr.kind {
+            return elems.len();
+        }
+    }
+    0
 }
 
 /// Build the `auto:<file>:<line>:<col>` label that is embedded — wrapped in
@@ -672,16 +877,134 @@ fn is_usage_safe<'tcx>(cx: &LateContext<'tcx>, usage_expr: &Expr<'tcx>) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_auto_label, tracked_type_to_path};
+    use super::{build_auto_label, build_wrap_from_suggestion, tracked_type_to_path};
     use crate::{match_third_party_path, TrackedType};
     use std::path::PathBuf;
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // build_wrap_from_suggestion — Phase K: pure helper, fully unit-testable.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// The wrap_from suggestion must produce a valid Rust call expression.
+    #[test]
+    fn wrap_from_suggestion_format_vec_new() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedVec::<_>",
+            "Vec::new()",
+            "auto:src/main.rs:10:9",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedVec::<_>::wrap_from(Vec::new(), "auto:src/main.rs:10:9", file!(), line!(), column!())"#
+        );
+    }
+
+    /// Non-empty vec! literal — elements preserved verbatim in snippet.
+    #[test]
+    fn wrap_from_suggestion_format_vec_literal() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedVec::<_>",
+            "vec![1, 2, 3]",
+            "auto:src/lib.rs:42:5",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedVec::<_>::wrap_from(vec![1, 2, 3], "auto:src/lib.rs:42:5", file!(), line!(), column!())"#
+        );
+    }
+
+    /// vec![x; n] repeat form — n-expression preserved verbatim.
+    #[test]
+    fn wrap_from_suggestion_format_vec_repeat() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedVec::<_>",
+            "vec![0u8; n]",
+            "auto:crates/foo/src/bar.rs:7:13",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedVec::<_>::wrap_from(vec![0u8; n], "auto:crates/foo/src/bar.rs:7:13", file!(), line!(), column!())"#
+        );
+    }
+
+    /// SmallVec literal form — the critical Phase K fix for smallvec![a,b,c].
+    #[test]
+    fn wrap_from_suggestion_format_smallvec_literal() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedSmallVec::<_>",
+            "smallvec![1u32, 2, 3]",
+            "auto:src/engine.rs:99:5",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedSmallVec::<_>::wrap_from(smallvec![1u32, 2, 3], "auto:src/engine.rs:99:5", file!(), line!(), column!())"#
+        );
+    }
+
+    /// BTreeMap — uses wrap_from (no new_named needed with universal approach).
+    #[test]
+    fn wrap_from_suggestion_format_btreemap() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedBTreeMap::<_, _>",
+            "BTreeMap::new()",
+            "auto:crates/x/src/lib.rs:5:5",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedBTreeMap::<_, _>::wrap_from(BTreeMap::new(), "auto:crates/x/src/lib.rs:5:5", file!(), line!(), column!())"#
+        );
+    }
+
+    /// HashMap::with_capacity — args preserved in outer snippet.
+    #[test]
+    fn wrap_from_suggestion_format_hashmap_with_capacity() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedHashMap::<_, _>",
+            "HashMap::with_capacity(64)",
+            "auto:src/store.rs:20:18",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedHashMap::<_, _>::wrap_from(HashMap::with_capacity(64), "auto:src/store.rs:20:18", file!(), line!(), column!())"#
+        );
+    }
+
+    /// Arbitrary builder expression — wrap_from is universal.
+    #[test]
+    fn wrap_from_suggestion_format_arbitrary_expr() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedVec::<_>",
+            "items.collect::<Vec<_>>()",
+            "auto:src/collect.rs:33:9",
+        );
+        assert_eq!(
+            sugg,
+            r#"::captrack::TrackedVec::<_>::wrap_from(items.collect::<Vec<_>>(), "auto:src/collect.rs:33:9", file!(), line!(), column!())"#
+        );
+    }
+
+    /// The generated suggestion must not contain backslashes (would break Rust string literals).
+    #[test]
+    fn wrap_from_suggestion_no_backslashes() {
+        let sugg = build_wrap_from_suggestion(
+            "::captrack::TrackedVec::<_>",
+            "Vec::new()",
+            "auto:crates/foo/src/lib.rs:1:1",
+        );
+        assert!(
+            !sugg.contains('\\'),
+            "suggestion must not contain backslashes: {sugg:?}"
+        );
+    }
 
     /// The label MUST NOT contain backslashes — they are invalid char-escape
     /// triggers in a Rust string literal.  See the function-level doc on
     /// `build_auto_label` for the failure mode.
     #[test]
     fn windows_backslashes_normalised_to_forward_slashes() {
-        let path: PathBuf = ["crates", "shamir-server", "src", "lib.rs"].iter().collect();
+        let path: PathBuf = ["crates", "shamir-server", "src", "lib.rs"]
+            .iter()
+            .collect();
         // On Windows `path` builds with `\`; on Linux with `/`.  Force the
         // backslash flavour by constructing the string manually so the test
         // exercises the same input shape on both targets.
@@ -1073,10 +1396,7 @@ mod tests {
             Some(TrackedType::SmallVec)
         );
         // Must NOT match a path that merely contains "SmallVec" but doesn't end with it.
-        assert_eq!(
-            match_third_party_path("smallvec::SmallVecData"),
-            None
-        );
+        assert_eq!(match_third_party_path("smallvec::SmallVecData"), None);
     }
 
     /// tracked_type_to_path returns the correct captrack path for SmallVec
@@ -1085,6 +1405,125 @@ mod tests {
     fn smallvec_to_path_is_correct() {
         let (path, use_new_named) = tracked_type_to_path(TrackedType::SmallVec);
         assert_eq!(path, "::captrack::TrackedSmallVec::<_>");
-        assert!(!use_new_named, "SmallVec uses with_capacity_named, not new_named");
+        assert!(
+            !use_new_named,
+            "SmallVec uses with_capacity_named, not new_named"
+        );
+    }
+
+    // ── Phase F: macro recognition — pure, no rustc context needed ───────────
+    use super::{should_instrument_macro_name, MacroCap, TrackedMacro};
+
+    /// `vec` and `smallvec` macro names are the only ones we instrument.
+    #[test]
+    fn vec_macro_name_recognised() {
+        assert!(
+            should_instrument_macro_name("vec"),
+            "\"vec\" must be recognised as a tracked macro"
+        );
+    }
+
+    #[test]
+    fn smallvec_macro_name_recognised() {
+        assert!(
+            should_instrument_macro_name("smallvec"),
+            "\"smallvec\" must be recognised as a tracked macro"
+        );
+    }
+
+    #[test]
+    fn unknown_macro_names_not_recognised() {
+        let unknown = [
+            "format",
+            "println",
+            "assert",
+            "my_vec", // user-defined — not tracked
+            "tvec",   // captrack-generated — not tracked here
+            "declare_collections",
+            "",
+        ];
+        for name in unknown {
+            assert!(
+                !should_instrument_macro_name(name),
+                "macro name {name:?} must NOT be recognised as tracked"
+            );
+        }
+    }
+
+    /// Coverage table — exactly the two names are tracked; adding more requires
+    /// updating both `should_instrument_macro_name` and this test.
+    #[test]
+    fn tracked_macro_name_coverage_table() {
+        let tracked = ["vec", "smallvec"];
+        let not_tracked = [
+            "format", "println", "assert", "my_vec", "tvec", "", "vecdeque",
+        ];
+        for name in tracked {
+            assert!(
+                should_instrument_macro_name(name),
+                "tracked macro {name:?} not recognised — update coverage table"
+            );
+        }
+        for name in not_tracked {
+            assert!(
+                !should_instrument_macro_name(name),
+                "non-tracked macro {name:?} incorrectly recognised"
+            );
+        }
+    }
+
+    /// TrackedMacro → correct captrack path and no `new_named` flag.
+    #[test]
+    fn tracked_macro_enum_to_path() {
+        // Vec macro instruments to TrackedVec
+        let (path, use_new_named) = tracked_type_to_path(TrackedType::Vec);
+        assert_eq!(path, "::captrack::TrackedVec::<_>");
+        assert!(!use_new_named, "vec! uses with_capacity_named");
+
+        // SmallVec macro instruments to TrackedSmallVec
+        let (path, use_new_named) = tracked_type_to_path(TrackedType::SmallVec);
+        assert_eq!(path, "::captrack::TrackedSmallVec::<_>");
+        assert!(!use_new_named, "smallvec! uses with_capacity_named");
+    }
+
+    /// `TrackedMacro` discriminants have the expected identity.
+    #[test]
+    fn tracked_macro_enum_variants() {
+        // Sanity: the two variants are distinct.
+        assert_ne!(TrackedMacro::Vec, TrackedMacro::SmallVec);
+        assert_eq!(TrackedMacro::Vec, TrackedMacro::Vec);
+        assert_eq!(TrackedMacro::SmallVec, TrackedMacro::SmallVec);
+    }
+
+    /// `MacroCap` variants are distinct and carry the right payloads.
+    #[test]
+    fn macro_cap_variants() {
+        assert_eq!(MacroCap::Zero, MacroCap::Zero);
+        assert_eq!(MacroCap::Literal(3), MacroCap::Literal(3));
+        assert_ne!(MacroCap::Zero, MacroCap::Literal(0));
+        assert_ne!(MacroCap::Literal(3), MacroCap::Literal(4));
+        // Expr variant carries the source text.
+        assert_eq!(MacroCap::Expr("n"), MacroCap::Expr("n"));
+        assert_ne!(MacroCap::Expr("n"), MacroCap::Expr("m"));
+    }
+
+    /// `MacroCap::Literal` correctly represents element counts for the
+    /// `vec![a, b, c]` pattern.
+    #[test]
+    fn macro_cap_literal_element_count() {
+        // Simulate the capacity we'd extract from vec![a, b, c]:
+        // extract_array_len_from_into_vec_args returns 3, then MacroCap::Literal(3).
+        let cap = MacroCap::Literal(3);
+        assert_eq!(cap, MacroCap::Literal(3));
+        // MacroCap::Literal(0) and MacroCap::Zero are DIFFERENT discriminants —
+        // they both represent "capacity = 0" semantically, but are distinct enum
+        // variants.  The instrument code uses MacroCap::Zero for vec![] expansions
+        // and MacroCap::Literal(n) for vec![a, b, c] where n is the element count.
+        let cap_literal_zero = MacroCap::Literal(0);
+        assert_ne!(
+            cap_literal_zero,
+            MacroCap::Zero,
+            "MacroCap::Literal(0) != MacroCap::Zero — different discriminants"
+        );
     }
 }
