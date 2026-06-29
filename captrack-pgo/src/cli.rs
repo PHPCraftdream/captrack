@@ -1,7 +1,8 @@
 //! CLI definitions for captrack-pgo.
 //!
 //! Subcommands:
-//!   measure        — placeholder for a future "run bench under profiler" helper.
+//!   measure        — full PGO collection cycle: wire → instrument → bench →
+//!                    merge → uninstrument → unwire (RAII cleanup on error).
 //!   apply          — Dylint-based capacity rewrite via `cargo dylint --fix`.
 //!   instrument     — Dylint-based auto-wrap via `cargo dylint --fix` +
 //!                    `CAPTRACK_PGO_INSTRUMENT=1`.
@@ -13,8 +14,11 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use crate::analyze;
 use crate::lint_apply::{self, CapFromChoice, CapRoundChoice, HasherChoice};
 use crate::lint_instrument;
+use crate::measure;
+use crate::merge;
 use crate::wire;
 
 #[derive(Parser, Debug)]
@@ -26,11 +30,54 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run a bench under a profiler and collect a heap snapshot (not yet implemented).
+    /// Run the full PGO collection cycle: wire → instrument → bench → merge →
+    /// uninstrument → unwire, in one command.
+    ///
+    /// The target workspace is wired with the `captrack` dependency, instrumented
+    /// via `cargo dylint --fix`, each bench binary is built and run with
+    /// `CAPTRACK_DUMP_DIR` set to collect per-invocation capacity samples, and
+    /// then all dumps are merged into a single profile JSON that `apply` consumes.
+    ///
+    /// RAII cleanup: if any step fails, uninstrument + unwire still run
+    /// (best-effort) so the target workspace is always restored.
     Measure {
-        /// Bench target name (e.g. `tx_pipeline`).
+        /// Workspace root of the target project to instrument and measure.
         #[arg(long)]
-        bench: String,
+        workspace: PathBuf,
+
+        /// Path to a local `captrack` checkout (`path = "..."` dep injection).
+        #[arg(long, value_name = "PATH")]
+        captrack_path: PathBuf,
+
+        /// Bench target name(s) to build and run.  Repeat `--bench` for multiple targets.
+        #[arg(long, value_name = "NAME", num_args = 1..)]
+        bench: Vec<String>,
+
+        /// Path to the `captrack-pgo-lint` crate root.
+        /// Defaults to a sibling `captrack-pgo-lint/` directory.
+        #[arg(long)]
+        lint_path: Option<PathBuf>,
+
+        /// Output path for the merged profile JSON.
+        /// Default: `<workspace>/target/captrack-pgo/merged.json`.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+
+        /// Per-bench binary timeout in seconds before the process is killed.
+        #[arg(long, default_value = "60", value_name = "SECS")]
+        bench_timeout_secs: u64,
+
+        /// Override `CARGO_TARGET_DIR` for the target workspace builds.
+        #[arg(long, value_name = "PATH")]
+        cargo_target_dir: Option<PathBuf>,
+
+        /// Maximum samples per site after merging (0 = unlimited).  Default: 4096.
+        #[arg(long, default_value = "4096")]
+        reservoir_cap: usize,
+
+        /// Pass `--allow-dirty` to `cargo dylint` (allow dirty git trees).
+        #[arg(long)]
+        allow_dirty: bool,
     },
 
     /// Apply capacity suggestions via `cargo dylint --fix` (Dylint-based rewrite).
@@ -213,6 +260,57 @@ pub enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+
+    /// Merge multiple per-bench captrack profile dumps into one.
+    ///
+    /// When `wire → instrument → bench` produces a `profile-<binary>.json`
+    /// file per bench binary, this command deduplicates sites by
+    /// `(file, line, column)`, sums `creation_count`, and concatenates
+    /// (then optionally reservoir-samples) the per-site `samples` arrays.
+    /// The output is sorted by `max(samples)` descending.
+    ///
+    /// Glob patterns in `--inputs` (e.g. `*.json`) are expanded automatically.
+    Merge {
+        /// One or more input profile JSON paths.  May contain `*`/`?` globs.
+        #[arg(long = "inputs", value_name = "PATH", num_args = 1..)]
+        inputs: Vec<String>,
+
+        /// Destination path for the merged profile JSON.
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Maximum samples to keep per site after merging (Vitter R reservoir
+        /// sampling).  0 disables sampling.  Default: 4096.
+        #[arg(long, default_value = "4096")]
+        reservoir_cap: usize,
+    },
+
+    /// Classify each site's sample distribution and recommend per-site capacity
+    /// policy overrides.
+    ///
+    /// Reads a captrack profile JSON, classifies each site into one of:
+    /// UnimodalTight, UnimodalSpread, Bimodal, HeavyTail, MostlyZero, or
+    /// InsufficientData.  Prints a report (stdout or `--report <file>`) and
+    /// optionally injects `policy` fields back into the profile JSON so
+    /// `apply` picks them up per-site.
+    Analyze {
+        /// Path to a captrack profile JSON (raw dump or merged).
+        #[arg(long)]
+        profile: PathBuf,
+
+        /// Inject recommended policy fields back into the profile JSON.
+        ///
+        /// When set, each site with a non-default recommendation gets a
+        /// `policy: { cap_from, cap_mul, cap_round }` object written into
+        /// the profile JSON in-place.  The `apply` subcommand reads this
+        /// field per-site and overrides the global CLI defaults.
+        #[arg(long)]
+        write_policy: bool,
+
+        /// Write the text report to this file instead of stdout.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
 }
 
 /// Clap value_parser for `--hasher`.
@@ -259,8 +357,55 @@ fn parse_cap_round(s: &str) -> Result<CapRoundChoice, String> {
 
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Measure { bench } => {
-            eprintln!("measure --bench {bench}: not yet implemented");
+        Command::Measure {
+            workspace,
+            captrack_path,
+            bench,
+            lint_path,
+            out,
+            bench_timeout_secs,
+            cargo_target_dir,
+            reservoir_cap,
+            allow_dirty,
+        } => {
+            use crate::workspace as ws;
+            // Resolve workspace root for the default --out path.
+            let workspace_start = workspace.clone();
+            let workspace_root = ws::find_workspace_root(&workspace_start).with_context(|| {
+                format!(
+                    "locate workspace root from {}",
+                    workspace_start.display()
+                )
+            })?;
+            let out_resolved = out.unwrap_or_else(|| {
+                workspace_root
+                    .join("target")
+                    .join("captrack-pgo")
+                    .join("merged.json")
+            });
+            let report = measure::run_measure(measure::MeasureArgs {
+                workspace,
+                captrack_path,
+                benches: bench,
+                lint_path,
+                out: out_resolved,
+                bench_timeout: std::time::Duration::from_secs(bench_timeout_secs),
+                cargo_target_dir,
+                reservoir_cap,
+                allow_dirty,
+            })?;
+            println!("measure: done");
+            println!("  merged profile: {}", report.merged_path.display());
+            println!("  unique sites:   {}", report.unique_sites);
+            println!("  benches run:    {}", report.benches_run.len());
+            for b in &report.benches_run {
+                println!(
+                    "    {} (exit={}) → {}",
+                    b.name,
+                    b.exit_code,
+                    b.profile_path.display()
+                );
+            }
         }
         Command::Apply {
             profile,
@@ -311,7 +456,54 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             run_unwire(workspace, manifest)?;
         }
+        Command::Merge {
+            inputs,
+            output,
+            reservoir_cap,
+        } => {
+            run_merge(inputs, output, reservoir_cap)?;
+        }
+        Command::Analyze {
+            profile,
+            write_policy,
+            report,
+        } => {
+            analyze::run_analyze(analyze::AnalyzeArgs {
+                profile,
+                write_policy,
+                report,
+            })?;
+        }
     }
+    Ok(())
+}
+
+fn run_merge(
+    inputs: Vec<String>,
+    output: PathBuf,
+    reservoir_cap: usize,
+) -> anyhow::Result<()> {
+    let resolved = merge::expand_inputs(&inputs).context("expand --inputs")?;
+    let report = merge::run_merge(merge::MergeArgs {
+        inputs: resolved,
+        output: output.clone(),
+        reservoir_cap,
+    })?;
+    println!(
+        "merged {} input{} → {} unique site{}, {} samples → {} samples (reservoir_cap={}) → {}",
+        report.inputs_count,
+        if report.inputs_count == 1 { "" } else { "s" },
+        report.unique_sites,
+        if report.unique_sites == 1 { "" } else { "s" },
+        report.total_samples_pre_reservoir,
+        report.total_samples_post,
+        if reservoir_cap == 0 {
+            "disabled".to_string()
+        } else {
+            reservoir_cap.to_string()
+        },
+        output.display(),
+    );
     Ok(())
 }
 

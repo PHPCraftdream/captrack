@@ -4,9 +4,12 @@
 //! `docs/CAPACITY-PGO-PLAN.md#path-b-migration-completed` for the
 //! description of the current Dylint-based pipeline.
 
+mod analyze;
 mod cli;
 mod lint_apply;
 mod lint_instrument;
+mod measure;
+mod merge;
 mod model;
 mod profile;
 mod wire;
