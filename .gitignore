@@ -5,3 +5,8 @@ Cargo.lock.bak
 .vscode/
 *.swp
 .DS_Store
+
+# rustc Internal Compiler Error crash dumps — emitted under
+# .../<crate>/rustc-ice-<timestamp>-<pid>.txt during lint development
+# (touches nightly internals on `cargo test --test per_type`).
+rustc-ice-*.txt
