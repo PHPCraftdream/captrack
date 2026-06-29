@@ -282,7 +282,13 @@ fn check_and_instrument<'tcx>(
     // struct field, function argument, match arm tail, block tail — is
     // skipped. This is the smallest universally-safe set; the cost is some
     // missed sites, but each skip is preferable to a per-crate rollback.
+    //
+    // Phase L fallback: when the site is NOT safe for wrap_from (because the
+    // binding has Unsafe usages), try injecting `cap_inspect_at` at each
+    // by-value escape point instead — this is type-transparent (borrows `&v`)
+    // and avoids E0308.
     if !is_safe_instrument_context(cx, call_expr) {
+        try_phase_l_injection(cx, call_expr, span, tracked_type_display(tracked_ty));
         return;
     }
 
@@ -386,7 +392,13 @@ fn emit_macro_wrap_from_suggestion<'tcx>(
     tracked_macro: TrackedMacro,
 ) {
     // Data-flow guard — same as the non-macro path.
+    // Phase L: if not safe for wrap_from, try usage-point injection.
     if !is_safe_instrument_context(cx, call_expr) {
+        let display = match tracked_macro {
+            TrackedMacro::Vec => "vec!",
+            TrackedMacro::SmallVec => "smallvec!",
+        };
+        try_phase_l_injection(cx, call_expr, outer_span, display);
         return;
     }
 
@@ -875,9 +887,226 @@ fn is_usage_safe<'tcx>(cx: &LateContext<'tcx>, usage_expr: &Expr<'tcx>) -> bool 
     classify_parent_kind(parent_kind) == UsageSafety::Safe
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase L: consumption-point transparent inspection
+//
+// When `is_safe_instrument_context` returns false because the binding has
+// Unsafe usages (return, struct field init, fn arg, type-ascribed let, etc.),
+// we fall back to injecting `::captrack::CapInspect::cap_inspect_at(&v, ...)` at
+// each Unsafe usage point instead of wrapping the constructor.
+//
+// This is type-transparent: `cap_inspect_at` borrows `self` and records the
+// capacity without consuming or changing the binding's type — no E0308.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An Unsafe usage found during the usage walk — carries the span of the
+/// usage expression so we can emit a per-site `cap_inspect_at` suggestion.
+#[derive(Debug)]
+pub(crate) struct UnsafeUsage {
+    /// Span of the usage expression (`v` in `return v;`, `foo(v)`, etc.).
+    pub(crate) span: Span,
+}
+
+/// Extended UsageWalker that also **collects** Unsafe usage spans instead of
+/// just setting a boolean flag.  Used by the Phase L path.
+struct UnsafeUsageCollector<'a, 'tcx> {
+    cx: &'a LateContext<'tcx>,
+    target: HirId,
+    /// All Unsafe usages found in the body.
+    unsafe_usages: Vec<UnsafeUsage>,
+}
+
+impl<'tcx> Visitor<'tcx> for UnsafeUsageCollector<'_, 'tcx> {
+    type NestedFilter = nested_filter::OnlyBodies;
+
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.cx.tcx
+    }
+
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(QPath::Resolved(_, path)) = &expr.kind {
+            if let Res::Local(local_id) = path.res {
+                if local_id == self.target {
+                    if !is_usage_safe(self.cx, expr) {
+                        // Skip macro-expanded spans — injecting into a macro
+                        // expansion is syntactically invalid.
+                        if !expr.span.from_expansion() {
+                            // Idempotency guard: if this usage is the tail
+                            // expression of a block that already starts with a
+                            // `cap_inspect_at` call, the injection has already
+                            // been applied — skip to avoid doubling up.
+                            if !is_already_cap_inspect_wrapped(self.cx, expr) {
+                                self.unsafe_usages.push(UnsafeUsage {
+                                    span: expr.span,
+                                });
+                            }
+                        }
+                    }
+                    return; // Don't recurse into path.
+                }
+            }
+        }
+        intravisit::walk_expr(self, expr);
+    }
+}
+
+/// Idempotency check: return `true` when the given usage expression is already
+/// inside a `cap_inspect_at` injection block.
+///
+/// The pattern we inject is:
+/// ```text
+/// { ::captrack::CapInspect::cap_inspect_at(&v, "auto:...", ...); v }
+/// ```
+/// After one application, when the lint visits the body again it finds `v`
+/// in the tail position of a block that starts with a `cap_inspect_at` call.
+/// We detect this by checking: "is the parent of `usage_expr` a Block whose
+/// first statement's expression contains the string `cap_inspect_at`?"
+///
+/// This check is conservative — it uses snippet text matching to avoid
+/// depending on HIR structure of the generated code, which may not be
+/// directly observable in the same lint pass.
+fn is_already_cap_inspect_wrapped<'tcx>(
+    cx: &LateContext<'tcx>,
+    usage_expr: &Expr<'tcx>,
+) -> bool {
+    // Walk up ONE level.
+    let mut parents = cx.tcx.hir_parent_id_iter(usage_expr.hir_id);
+    let Some(parent_id) = parents.next() else {
+        return false;
+    };
+
+    // The immediate parent should be a Block (`ExprKind::Block`) for the
+    // injected `{ cap_inspect_at(...); v }` pattern.  If it is, look at the
+    // first statement in the block to see if it already calls `cap_inspect_at`.
+    let parent_node = cx.tcx.hir_node(parent_id);
+    if let Node::Expr(parent_expr) = parent_node {
+        if let ExprKind::Block(block, _) = &parent_expr.kind {
+            // The block's first statement should be a semi-expression
+            // containing `cap_inspect_at` if the pattern was already injected.
+            if let Some(first_stmt) = block.stmts.first() {
+                // Get the source snippet of the first statement and check for
+                // the cap_inspect_at marker string.
+                let stmt_span = first_stmt.span;
+                if let Some(snip) = snippet_opt(cx, stmt_span) {
+                    if snip.contains("cap_inspect_at") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Build the `cap_inspect_at` block-expression suggestion for a single usage.
+///
+/// Transforms usage `v` into:
+/// ```text
+/// { ::captrack::CapInspect::cap_inspect_at(&v, "auto:...", file!(), line!(), column!()); v }
+/// ```
+///
+/// The binding reference is borrowed (`&v`) — safe regardless of move
+/// semantics because the borrow is dropped before `v` is moved out of the
+/// block by the trailing expression.  The type of the block is the same as
+/// the type of `v` — no type change, no E0308.
+pub(crate) fn build_cap_inspect_suggestion(
+    binding_snippet: &str,
+    auto_label: &str,
+) -> String {
+    format!(
+        r#"{{ ::captrack::CapInspect::cap_inspect_at(&{binding_snippet}, "{auto_label}", file!(), line!(), column!()); {binding_snippet} }}"#,
+    )
+}
+
+/// Attempt Phase L injection for a call site whose context is NOT safe for
+/// `wrap_from` (i.e. the binding has at least one Unsafe usage).
+///
+/// Precondition: `call_expr`'s parent must be a `let` binding (either with
+/// or without explicit type annotation) with a plain identifier pattern.
+/// If this precondition fails (e.g. call is not in a let at all), returns
+/// `false` and does nothing.
+///
+/// For each Unsafe usage found, emits a separate `span_lint_and_sugg` with
+/// a `MachineApplicable` suggestion wrapping the usage in a block that calls
+/// `::captrack::CapInspect::cap_inspect_at(&v, ...)`.
+///
+/// Returns `true` if at least one suggestion was emitted.
+pub(crate) fn try_phase_l_injection<'tcx>(
+    cx: &LateContext<'tcx>,
+    call_expr: &Expr<'tcx>,
+    span: Span,
+    tracked_type_display: &str,
+) -> bool {
+    // Phase L only applies to macro-free (user-written) call sites.
+    if span.from_expansion() {
+        return false;
+    }
+
+    // Parent must be a let binding.
+    let mut parents = cx.tcx.hir_parent_id_iter(call_expr.hir_id);
+    let Some(parent_id) = parents.next() else {
+        return false;
+    };
+    let Node::LetStmt(local) = cx.tcx.hir_node(parent_id) else {
+        return false;
+    };
+
+    // Extract a plain identifier binding from the pattern.
+    let (binding_hid, binding_name) = match &local.pat.kind {
+        PatKind::Binding(_, hir_id, ident, None) => (*hir_id, ident.name),
+        _ => return false,
+    };
+
+    // Find the enclosing function body.
+    let Some(body_id) = enclosing_body_id(cx, call_expr.hir_id) else {
+        return false;
+    };
+    let body: &Body<'tcx> = cx.tcx.hir_body(body_id);
+
+    // Walk the body to collect all Unsafe usages.
+    let mut collector = UnsafeUsageCollector {
+        cx,
+        target: binding_hid,
+        unsafe_usages: Vec::new(),
+    };
+    collector.visit_body(body);
+
+    if collector.unsafe_usages.is_empty() {
+        return false;
+    }
+
+    // Compute the auto-label from the constructor call span (identifies the
+    // construction site so the profile key matches the ctor, not the usage).
+    let site = span_to_site_key(cx, span);
+    let auto_label = build_auto_label(&site.file, site.line, site.col);
+    let binding_str = binding_name.as_str();
+
+    let mut emitted = false;
+    for usage in &collector.unsafe_usages {
+        let sugg = build_cap_inspect_suggestion(binding_str, &auto_label);
+        span_lint_and_sugg(
+            cx,
+            CAPTRACK_PGO_INSTRUMENT,
+            usage.span,
+            format!(
+                "captrack-pgo-instrument: inject cap_inspect_at for `{}` at by-value escape point (Phase L)",
+                tracked_type_display,
+            ),
+            "wrap usage with cap_inspect_at block",
+            sugg,
+            Applicability::MachineApplicable,
+        );
+        emitted = true;
+    }
+    emitted
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_auto_label, build_wrap_from_suggestion, tracked_type_to_path};
+    use super::{
+        build_auto_label, build_cap_inspect_suggestion, build_wrap_from_suggestion,
+        tracked_type_to_path,
+    };
     use crate::{match_third_party_path, TrackedType};
     use std::path::PathBuf;
 
@@ -1525,5 +1754,115 @@ mod tests {
             MacroCap::Zero,
             "MacroCap::Literal(0) != MacroCap::Zero — different discriminants"
         );
+    }
+
+    // ── Phase L: build_cap_inspect_suggestion — pure helper, fully unit-testable ──
+
+    /// Return position: the block wraps the binding and returns it.
+    #[test]
+    fn cap_inspect_suggestion_return_position() {
+        let sugg = build_cap_inspect_suggestion("v", "auto:src/main.rs:10:9");
+        assert_eq!(
+            sugg,
+            r#"{ ::captrack::CapInspect::cap_inspect_at(&v, "auto:src/main.rs:10:9", file!(), line!(), column!()); v }"#
+        );
+    }
+
+    /// Struct field init: same block form, just used in field position.
+    #[test]
+    fn cap_inspect_suggestion_struct_field_init() {
+        let sugg = build_cap_inspect_suggestion("rows", "auto:crates/foo/src/lib.rs:42:5");
+        assert_eq!(
+            sugg,
+            r#"{ ::captrack::CapInspect::cap_inspect_at(&rows, "auto:crates/foo/src/lib.rs:42:5", file!(), line!(), column!()); rows }"#
+        );
+    }
+
+    /// Fn arg: same block form works as a function call argument.
+    #[test]
+    fn cap_inspect_suggestion_fn_call_arg() {
+        let sugg = build_cap_inspect_suggestion("buf", "auto:src/codec.rs:7:13");
+        assert_eq!(
+            sugg,
+            r#"{ ::captrack::CapInspect::cap_inspect_at(&buf, "auto:src/codec.rs:7:13", file!(), line!(), column!()); buf }"#
+        );
+    }
+
+    /// Type-ascribed let init: same block form is valid as the RHS.
+    #[test]
+    fn cap_inspect_suggestion_type_ascribed_let() {
+        let sugg = build_cap_inspect_suggestion("data", "auto:src/store.rs:20:18");
+        assert_eq!(
+            sugg,
+            r#"{ ::captrack::CapInspect::cap_inspect_at(&data, "auto:src/store.rs:20:18", file!(), line!(), column!()); data }"#
+        );
+    }
+
+    /// The suggestion must never contain backslashes — would break string literals.
+    #[test]
+    fn cap_inspect_suggestion_no_backslashes() {
+        let sugg = build_cap_inspect_suggestion("v", "auto:crates/foo/src/lib.rs:1:1");
+        assert!(
+            !sugg.contains('\\'),
+            "cap_inspect suggestion must not contain backslashes: {sugg:?}"
+        );
+    }
+
+    /// Windows-style path in label must be normalised before reaching the suggestion.
+    #[test]
+    fn cap_inspect_suggestion_label_from_windows_path() {
+        let win_path = PathBuf::from(r"crates\shamir-server\src\lib.rs");
+        let label = build_auto_label(&win_path, 42, 7);
+        // Verify label has no backslashes.
+        assert!(!label.contains('\\'), "label must not retain backslashes: {label:?}");
+        // Build suggestion with normalised label.
+        let sugg = build_cap_inspect_suggestion("v", &label);
+        assert!(
+            !sugg.contains('\\'),
+            "suggestion with windows-path label must not contain backslashes: {sugg:?}"
+        );
+        assert_eq!(
+            sugg,
+            r#"{ ::captrack::CapInspect::cap_inspect_at(&v, "auto:crates/shamir-server/src/lib.rs:42:7", file!(), line!(), column!()); v }"#
+        );
+    }
+
+    /// Coverage table — exactly the same unsafe parent kinds trigger Phase L.
+    /// Mirrors coverage_table_locks_the_safety_classification but verifies from
+    /// Phase L's perspective: these are the positions that cap_inspect should handle.
+    #[test]
+    fn phase_l_coverage_table_unsafe_positions() {
+        use super::{classify_parent_kind, ParentKind, UsageSafety};
+
+        // Positions where Phase L injection is needed (Unsafe).
+        let unsafe_positions = [
+            ParentKind::Return,
+            ParentKind::StructField,
+            ParentKind::Call,
+            ParentKind::MethodCallArg,
+            ParentKind::Tuple,
+            ParentKind::Other,
+        ];
+        // Positions where wrap_from is sufficient (Safe — no Phase L needed).
+        let safe_positions = [
+            ParentKind::MethodCallReceiver,
+            ParentKind::AddrOf,
+            ParentKind::Index,
+        ];
+
+        for pos in unsafe_positions {
+            assert_eq!(
+                classify_parent_kind(pos),
+                UsageSafety::Unsafe,
+                "Phase L must handle {pos:?} (it is Unsafe)"
+            );
+        }
+        for pos in safe_positions {
+            assert_eq!(
+                classify_parent_kind(pos),
+                UsageSafety::Safe,
+                "Phase L must NOT inject at {pos:?} (it is Safe, wrap_from handles it)"
+            );
+        }
     }
 }
