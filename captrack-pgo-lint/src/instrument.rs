@@ -22,7 +22,7 @@ use rustc_middle::ty::TyKind;
 use rustc_session::declare_lint;
 use rustc_span::Symbol;
 
-use crate::{is_tracked_method, span_to_site_key, sym_with_capacity_and_hasher, TRACKED_TYPES};
+use crate::{is_tracked_method, recognise_tracked_type, span_to_site_key, sym_with_capacity_and_hasher, TrackedType};
 
 declare_lint! {
     /// ### What it does
@@ -105,27 +105,53 @@ impl<'tcx> LateLintPass<'tcx> for CaptrackPgoInstrument {
     }
 }
 
-/// Map a diagnostic type symbol to the absolute `::captrack::TrackedX` path
-/// and the constructor method to call.
+/// Map a `TrackedType` to the absolute `::captrack::TrackedX` path and
+/// constructor style.
 ///
 /// Returns `(tracked_path, use_new_named)` where:
 /// - `tracked_path` is e.g. `"::captrack::TrackedVec::<_>"`
-/// - `use_new_named` is true for BTree types that only have `new_named`
-fn symbol_to_tracked(sym: Symbol) -> Option<(&'static str, bool)> {
-    if sym == sym::Vec {
-        Some(("::captrack::TrackedVec::<_>", false))
-    } else if sym == sym::VecDeque {
-        Some(("::captrack::TrackedVecDeque::<_>", false))
-    } else if sym == sym::HashMap {
-        Some(("::captrack::TrackedHashMap::<_, _>", false))
-    } else if sym == sym::HashSet {
-        Some(("::captrack::TrackedHashSet::<_, _>", false))
-    } else if sym == sym::BTreeMap {
-        Some(("::captrack::TrackedBTreeMap::<_, _>", true))
-    } else if sym == sym::BTreeSet {
-        Some(("::captrack::TrackedBTreeSet::<_>", true))
-    } else {
-        None
+/// - `use_new_named` is `true` for types that only have `new_named` (BTree
+///   types and `SccTreeIndex` — they have no `with_capacity` constructor).
+///
+/// `SmallVec` uses `with_capacity_named` (not `new_named`) because
+/// `TrackedSmallVec::with_capacity_named(0, …)` is valid and correctly
+/// initialises the inline array storage.
+pub(crate) fn tracked_type_to_path(t: TrackedType) -> (&'static str, bool) {
+    match t {
+        TrackedType::Vec => ("::captrack::TrackedVec::<_>", false),
+        TrackedType::VecDeque => ("::captrack::TrackedVecDeque::<_>", false),
+        TrackedType::HashMap => ("::captrack::TrackedHashMap::<_, _>", false),
+        TrackedType::HashSet => ("::captrack::TrackedHashSet::<_, _>", false),
+        TrackedType::BTreeMap => ("::captrack::TrackedBTreeMap::<_, _>", true),
+        TrackedType::BTreeSet => ("::captrack::TrackedBTreeSet::<_>", true),
+        TrackedType::BytesMut => ("::captrack::TrackedBytesMut", false),
+        TrackedType::IndexMap => ("::captrack::TrackedIndexMap::<_, _>", false),
+        TrackedType::IndexSet => ("::captrack::TrackedIndexSet::<_>", false),
+        TrackedType::DashMap => ("::captrack::TrackedDashMap::<_, _>", false),
+        TrackedType::SccHashMap => ("::captrack::TrackedSccHashMap::<_, _>", false),
+        TrackedType::SccHashSet => ("::captrack::TrackedSccHashSet::<_>", false),
+        TrackedType::SccTreeIndex => ("::captrack::TrackedSccTreeIndex::<_, _>", true),
+        TrackedType::SmallVec => ("::captrack::TrackedSmallVec::<_>", false),
+    }
+}
+
+/// Short display name for a `TrackedType` used in lint messages.
+fn tracked_type_display(t: TrackedType) -> &'static str {
+    match t {
+        TrackedType::Vec => "Vec",
+        TrackedType::VecDeque => "VecDeque",
+        TrackedType::HashMap => "HashMap",
+        TrackedType::HashSet => "HashSet",
+        TrackedType::BTreeMap => "BTreeMap",
+        TrackedType::BTreeSet => "BTreeSet",
+        TrackedType::BytesMut => "bytes::BytesMut",
+        TrackedType::IndexMap => "indexmap::IndexMap",
+        TrackedType::IndexSet => "indexmap::IndexSet",
+        TrackedType::DashMap => "dashmap::DashMap",
+        TrackedType::SccHashMap => "scc::HashMap",
+        TrackedType::SccHashSet => "scc::HashSet",
+        TrackedType::SccTreeIndex => "scc::TreeIndex",
+        TrackedType::SmallVec => "SmallVec",
     }
 }
 
@@ -141,6 +167,12 @@ fn check_and_instrument<'tcx>(
     let span = call_expr.span;
 
     // Skip macro-expanded sites (e.g. `vec![]`).
+    //
+    // TODO(vec!-macro): attempt to detect `vec![]` expansion via
+    // `span.source_callsite()` and instrument the outer user-visible span.
+    // The API needed (resolving `outer.ctxt().outer_expn_data().macro_def_id`
+    // to a `def_path_str` of `"std::vec"`) is available on nightly but requires
+    // careful lifetime handling across `ExpnData`.  Deferred to a future pass.
     if span.from_expansion() {
         return;
     }
@@ -176,12 +208,13 @@ fn check_and_instrument<'tcx>(
     let TyKind::Adt(adt_def, _) = self_ty.kind() else {
         return;
     };
-    let Some(diag_name) = cx.tcx.get_diagnostic_name(adt_def.did()) else {
+
+    // Recognise the Self type as one of the 13 tracked collection types.
+    // This covers both std types (via diagnostic name) and third-party types
+    // (via def_path_str) in a single call.
+    let Some(tracked_ty) = recognise_tracked_type(cx, adt_def.did()) else {
         return;
     };
-    if !TRACKED_TYPES.contains(&diag_name) {
-        return;
-    }
 
     // Skip if the receiver type is already a TrackedX type (double-instrument
     // guard). We detect this by checking whether the return type of the call
@@ -195,9 +228,7 @@ fn check_and_instrument<'tcx>(
         }
     }
 
-    let Some((tracked_path, use_new_named)) = symbol_to_tracked(diag_name) else {
-        return;
-    };
+    let (tracked_path, use_new_named) = tracked_type_to_path(tracked_ty);
 
     // Bail out if rewriting this call-site would produce a `TrackedX` value in
     // a position where the surrounding code expects the bare `X`. `TrackedX`
@@ -240,7 +271,7 @@ fn check_and_instrument<'tcx>(
         span,
         format!(
             "captrack-pgo-instrument: wrapping `{}` constructor for telemetry profiling",
-            diag_name.as_str()
+            tracked_type_display(tracked_ty)
         ),
         "instrument with TrackedX::with_capacity_named",
         sugg_text,
@@ -278,14 +309,18 @@ fn build_instrument_suggestion<'tcx>(
     let name_arg = format!("\"{auto_label}\"");
     let meta_args = format!("file!(), line!(), column!()");
 
-    if method_name == sym::new {
+    if method_name == sym::new || method_name == sym::Default {
+        // `default()` (sym::Default = interned "default") is a zero-capacity
+        // constructor equivalent to `new()`.  Instrument it identically:
+        // emit with_capacity_named(0, …) so the profiling run records a site
+        // with initial capacity = 0.
         if use_new_named {
             // BTree types: use new_named(cap_hint=0, name, file, line, col)
             Some(format!(
                 "{tracked_path}::new_named(0, {name_arg}, {meta_args})"
             ))
         } else {
-            // Vec, VecDeque, HashMap, HashSet: with_capacity_named(0, ...)
+            // Vec, VecDeque, HashMap, HashSet, SmallVec: with_capacity_named(0, ...)
             Some(format!(
                 "{tracked_path}::with_capacity_named(0, {name_arg}, {meta_args})"
             ))
@@ -637,7 +672,8 @@ fn is_usage_safe<'tcx>(cx: &LateContext<'tcx>, usage_expr: &Expr<'tcx>) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::build_auto_label;
+    use super::{build_auto_label, tracked_type_to_path};
+    use crate::{match_third_party_path, TrackedType};
     use std::path::PathBuf;
 
     /// The label MUST NOT contain backslashes — they are invalid char-escape
@@ -811,5 +847,244 @@ mod tests {
             "exactly three ParentKinds (MethodCallReceiver, AddrOf, Index) are Safe; \
              a change here means someone added a new Safe path — review it carefully"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // match_third_party_path — pure string-matching, fully unit-testable.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn scc_hashmap_recognised() {
+        assert_eq!(
+            match_third_party_path("scc::hash_map::HashMap"),
+            Some(TrackedType::SccHashMap)
+        );
+    }
+
+    #[test]
+    fn scc_hashset_recognised() {
+        assert_eq!(
+            match_third_party_path("scc::hash_set::HashSet"),
+            Some(TrackedType::SccHashSet)
+        );
+    }
+
+    #[test]
+    fn scc_tree_index_recognised() {
+        assert_eq!(
+            match_third_party_path("scc::tree_index::TreeIndex"),
+            Some(TrackedType::SccTreeIndex)
+        );
+    }
+
+    #[test]
+    fn dashmap_recognised() {
+        assert_eq!(
+            match_third_party_path("dashmap::DashMap"),
+            Some(TrackedType::DashMap)
+        );
+    }
+
+    #[test]
+    fn bytesmut_recognised() {
+        assert_eq!(
+            match_third_party_path("bytes::BytesMut"),
+            Some(TrackedType::BytesMut)
+        );
+        // Also handle internal module path if crate reshuffles it.
+        assert_eq!(
+            match_third_party_path("bytes::bytes_mut::BytesMut"),
+            Some(TrackedType::BytesMut)
+        );
+    }
+
+    #[test]
+    fn indexmap_recognised() {
+        // Canonical internal path as of indexmap 2.x.
+        assert_eq!(
+            match_third_party_path("indexmap::map::IndexMap"),
+            Some(TrackedType::IndexMap)
+        );
+        // Re-exported flat path.
+        assert_eq!(
+            match_third_party_path("indexmap::IndexMap"),
+            Some(TrackedType::IndexMap)
+        );
+    }
+
+    #[test]
+    fn indexset_recognised() {
+        assert_eq!(
+            match_third_party_path("indexmap::set::IndexSet"),
+            Some(TrackedType::IndexSet)
+        );
+        assert_eq!(
+            match_third_party_path("indexmap::IndexSet"),
+            Some(TrackedType::IndexSet)
+        );
+    }
+
+    /// std types must NOT match (they are handled by diagnostic-name).
+    #[test]
+    fn std_vec_not_matched_by_third_party() {
+        assert_eq!(match_third_party_path("std::vec::Vec"), None);
+        assert_eq!(match_third_party_path("alloc::vec::Vec"), None);
+    }
+
+    /// Unrelated types must not match.
+    #[test]
+    fn unrelated_types_not_matched() {
+        assert_eq!(match_third_party_path("tokio::sync::Mutex"), None);
+        assert_eq!(match_third_party_path("std::collections::HashMap"), None);
+        assert_eq!(match_third_party_path("scc::ebr::AtomicOwned"), None);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // tracked_type_to_path — every variant must map to a non-empty path.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tracked_type_to_path_covers_all_variants() {
+        let all = [
+            TrackedType::Vec,
+            TrackedType::VecDeque,
+            TrackedType::HashMap,
+            TrackedType::HashSet,
+            TrackedType::BTreeMap,
+            TrackedType::BTreeSet,
+            TrackedType::BytesMut,
+            TrackedType::IndexMap,
+            TrackedType::IndexSet,
+            TrackedType::DashMap,
+            TrackedType::SccHashMap,
+            TrackedType::SccHashSet,
+            TrackedType::SccTreeIndex,
+            TrackedType::SmallVec,
+        ];
+        for t in all {
+            let (path, _use_new_named) = tracked_type_to_path(t);
+            assert!(
+                !path.is_empty(),
+                "tracked_type_to_path({t:?}) returned empty path"
+            );
+            assert!(
+                path.starts_with("::captrack::"),
+                "path for {t:?} must start with ::captrack:: but got {path:?}"
+            );
+        }
+        // Exactly 14 variants — assert count to lock against silent additions.
+        assert_eq!(all.len(), 14, "TrackedType must have exactly 14 variants");
+    }
+
+    /// BTree types and SccTreeIndex use new_named (no with_capacity); the
+    /// rest use with_capacity_named.  SmallVec has with_capacity_named
+    /// (TrackedSmallVec::with_capacity_named(0, …) is valid).
+    #[test]
+    fn new_named_flag_correct_for_each_type() {
+        let new_named_types = [
+            TrackedType::BTreeMap,
+            TrackedType::BTreeSet,
+            TrackedType::SccTreeIndex,
+        ];
+        let with_capacity_types = [
+            TrackedType::Vec,
+            TrackedType::VecDeque,
+            TrackedType::HashMap,
+            TrackedType::HashSet,
+            TrackedType::BytesMut,
+            TrackedType::IndexMap,
+            TrackedType::IndexSet,
+            TrackedType::DashMap,
+            TrackedType::SccHashMap,
+            TrackedType::SccHashSet,
+            TrackedType::SmallVec,
+        ];
+        for t in new_named_types {
+            let (_, use_new_named) = tracked_type_to_path(t);
+            assert!(
+                use_new_named,
+                "{t:?} should have use_new_named=true (no with_capacity)"
+            );
+        }
+        for t in with_capacity_types {
+            let (_, use_new_named) = tracked_type_to_path(t);
+            assert!(
+                !use_new_named,
+                "{t:?} should have use_new_named=false (has with_capacity_named)"
+            );
+        }
+    }
+
+    /// Coverage table for match_third_party_path — all 8 third-party types
+    /// and selected non-matches, analogous to coverage_table_locks_the_safety_classification.
+    #[test]
+    fn coverage_table_third_party_paths() {
+        let should_match = [
+            ("bytes::BytesMut", TrackedType::BytesMut),
+            ("bytes::bytes_mut::BytesMut", TrackedType::BytesMut),
+            ("indexmap::map::IndexMap", TrackedType::IndexMap),
+            ("indexmap::IndexMap", TrackedType::IndexMap),
+            ("indexmap::set::IndexSet", TrackedType::IndexSet),
+            ("indexmap::IndexSet", TrackedType::IndexSet),
+            ("dashmap::DashMap", TrackedType::DashMap),
+            ("dashmap::mapref::DashMap", TrackedType::DashMap),
+            ("scc::hash_map::HashMap", TrackedType::SccHashMap),
+            ("scc::hash_set::HashSet", TrackedType::SccHashSet),
+            ("scc::tree_index::TreeIndex", TrackedType::SccTreeIndex),
+            ("smallvec::SmallVec", TrackedType::SmallVec),
+        ];
+        let should_not_match = [
+            "std::vec::Vec",
+            "std::collections::HashMap",
+            "std::collections::HashSet",
+            "alloc::collections::BTreeMap",
+            "tokio::sync::Mutex",
+            "scc::ebr::AtomicOwned",
+            // SmallVec must NOT match partial paths that don't end with "SmallVec".
+            "smallvec::alloc::SmallVecData",
+        ];
+
+        for (path, expected) in should_match {
+            assert_eq!(
+                match_third_party_path(path),
+                Some(expected),
+                "expected {path:?} to match {expected:?}"
+            );
+        }
+        for path in should_not_match {
+            assert_eq!(
+                match_third_party_path(path),
+                None,
+                "expected {path:?} to NOT match any TrackedType"
+            );
+        }
+    }
+
+    /// SmallVec is recognised by path "smallvec::SmallVec".
+    #[test]
+    fn smallvec_recognised_via_path() {
+        assert_eq!(
+            match_third_party_path("smallvec::SmallVec"),
+            Some(TrackedType::SmallVec)
+        );
+        // Internal module reshuffling must still match.
+        assert_eq!(
+            match_third_party_path("smallvec::smallvec::SmallVec"),
+            Some(TrackedType::SmallVec)
+        );
+        // Must NOT match a path that merely contains "SmallVec" but doesn't end with it.
+        assert_eq!(
+            match_third_party_path("smallvec::SmallVecData"),
+            None
+        );
+    }
+
+    /// tracked_type_to_path returns the correct captrack path for SmallVec
+    /// and marks it as using with_capacity_named (not new_named).
+    #[test]
+    fn smallvec_to_path_is_correct() {
+        let (path, use_new_named) = tracked_type_to_path(TrackedType::SmallVec);
+        assert_eq!(path, "::captrack::TrackedSmallVec::<_>");
+        assert!(!use_new_named, "SmallVec uses with_capacity_named, not new_named");
     }
 }

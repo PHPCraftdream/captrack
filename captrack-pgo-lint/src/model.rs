@@ -138,16 +138,28 @@ pub enum CapExpr {
 /// Constructor kind recognised at a matched call-site.
 ///
 /// Used to decide which suggestion form to emit:
-/// - `BTreeMap` / `BTreeSet` → no suggestion (they have no `with_capacity`).
+/// - `BTreeMap` / `BTreeSet` / `SccTreeIndex` → no suggestion (they have no `with_capacity`).
 /// - Hash-keyed types with `with_capacity_and_hasher` → preserve the hasher arg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ctor {
+    // ── std library ──────────────────────────────────────────────────────────
     Vec,
     VecDeque,
     HashMap,
     HashSet,
     BTreeMap,
     BTreeSet,
+    // ── third-party ──────────────────────────────────────────────────────────
+    BytesMut,
+    IndexMap,
+    IndexSet,
+    DashMap,
+    SccHashMap,
+    SccHashSet,
+    /// `scc::TreeIndex` — no `with_capacity`; uses `new_named` like BTree types.
+    SccTreeIndex,
+    /// `smallvec::SmallVec` — capacity-backed, uses `with_capacity_named`.
+    SmallVec,
 }
 
 #[cfg(test)]

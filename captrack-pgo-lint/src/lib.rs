@@ -18,6 +18,7 @@ use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Node, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyKind;
+use rustc_span::def_id::DefId;
 use rustc_span::{FileName, Symbol};
 
 pub mod instrument;
@@ -117,17 +118,138 @@ rustc_session::impl_lint_pass!(instrument::CaptrackPgoInstrument => [CAPTRACK_PG
 #[derive(Default)]
 pub struct CaptrackPgoCapacity;
 
-/// Symbols for the collection types we care about.
-/// `Vec`, `HashMap`, `HashSet`, `BTreeMap` are in `rustc_span::sym::*`.
-/// `BTreeSet` and `VecDeque` are added by clippy_utils.
-pub(crate) const TRACKED_TYPES: &[Symbol] = &[
-    sym::Vec,
-    sym::VecDeque,
-    sym::HashMap,
-    sym::HashSet,
-    sym::BTreeMap,
-    sym::BTreeSet,
-];
+// ── TrackedType enum — full 14-type recognition ───────────────────────────────
+
+/// All 14 collection types that captrack can track.
+///
+/// The first 6 are standard-library types recognised via `get_diagnostic_name`.
+/// The remaining 8 are third-party types recognised via `def_path_str`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackedType {
+    // std
+    Vec,
+    VecDeque,
+    HashMap,
+    HashSet,
+    BTreeMap,
+    BTreeSet,
+    // third-party
+    BytesMut,
+    IndexMap,
+    IndexSet,
+    DashMap,
+    SccHashMap,
+    SccHashSet,
+    SccTreeIndex,
+    SmallVec,
+}
+
+/// Pure string-match helper for third-party paths.
+///
+/// Accepts the string produced by `cx.tcx.def_path_str(did)` and returns
+/// the matching `TrackedType` if it is a third-party collection we track.
+///
+/// Std types (`std::vec::Vec`, etc.) are handled separately via
+/// `get_diagnostic_name` — this function returns `None` for them so the
+/// caller can fall through to the diagnostic-name branch.
+///
+/// The matching strategy is a **prefix + suffix** check so that internal
+/// module reshuffling inside a crate (e.g. `indexmap::map::IndexMap` vs
+/// `indexmap::IndexMap`) does not break recognition:
+///
+/// - path starts with `"bytes::"` AND contains `"BytesMut"` → BytesMut
+/// - path starts with `"indexmap::"` AND contains `"::IndexMap"` → IndexMap
+/// - path starts with `"indexmap::"` AND contains `"::IndexSet"` → IndexSet
+/// - path starts with `"dashmap::"` AND contains `"DashMap"` → DashMap
+/// - path starts with `"scc::"` AND contains `"::HashMap"` → SccHashMap
+/// - path starts with `"scc::"` AND contains `"::HashSet"` → SccHashSet
+/// - path starts with `"scc::"` AND (contains `"::TreeIndex"` OR ends with `"TreeIndex"`) → SccTreeIndex
+/// - path starts with `"smallvec::"` AND ends with `"SmallVec"` → SmallVec
+pub(crate) fn match_third_party_path(path: &str) -> Option<TrackedType> {
+    if path.starts_with("bytes::") && path.contains("BytesMut") {
+        return Some(TrackedType::BytesMut);
+    }
+    if path.starts_with("indexmap::") {
+        if path.contains("IndexMap") && !path.contains("IndexSet") {
+            return Some(TrackedType::IndexMap);
+        }
+        if path.contains("IndexSet") {
+            return Some(TrackedType::IndexSet);
+        }
+    }
+    if path.starts_with("dashmap::") && path.contains("DashMap") {
+        return Some(TrackedType::DashMap);
+    }
+    if path.starts_with("scc::") {
+        // Must test TreeIndex before HashMap/HashSet (no overlap, but be explicit).
+        if path.contains("TreeIndex") {
+            return Some(TrackedType::SccTreeIndex);
+        }
+        if path.contains("HashMap") {
+            return Some(TrackedType::SccHashMap);
+        }
+        if path.contains("HashSet") {
+            return Some(TrackedType::SccHashSet);
+        }
+    }
+    if path.starts_with("smallvec::") && path.ends_with("SmallVec") {
+        return Some(TrackedType::SmallVec);
+    }
+    None
+}
+
+/// Recognise a `DefId` as one of the 13 tracked collection types.
+///
+/// Two-step:
+/// 1. Try `get_diagnostic_name` — fast, stable, covers the 6 std types.
+/// 2. Fall back to `def_path_str` + `match_third_party_path` for the 7
+///    third-party types.
+pub(crate) fn recognise_tracked_type(cx: &LateContext<'_>, did: DefId) -> Option<TrackedType> {
+    // Step 1 — diagnostic names for std types.
+    if let Some(diag) = cx.tcx.get_diagnostic_name(did) {
+        if diag == sym::Vec {
+            return Some(TrackedType::Vec);
+        }
+        if diag == sym::VecDeque {
+            return Some(TrackedType::VecDeque);
+        }
+        if diag == sym::HashMap {
+            return Some(TrackedType::HashMap);
+        }
+        if diag == sym::HashSet {
+            return Some(TrackedType::HashSet);
+        }
+        if diag == sym::BTreeMap {
+            return Some(TrackedType::BTreeMap);
+        }
+        if diag == sym::BTreeSet {
+            return Some(TrackedType::BTreeSet);
+        }
+    }
+    // Step 2 — path-based recognition for third-party types.
+    let path = cx.tcx.def_path_str(did);
+    match_third_party_path(&path)
+}
+
+/// Map a `TrackedType` to the `Ctor` enum used by the capacity lint.
+pub(crate) fn tracked_type_to_ctor(t: TrackedType) -> Ctor {
+    match t {
+        TrackedType::Vec => Ctor::Vec,
+        TrackedType::VecDeque => Ctor::VecDeque,
+        TrackedType::HashMap => Ctor::HashMap,
+        TrackedType::HashSet => Ctor::HashSet,
+        TrackedType::BTreeMap => Ctor::BTreeMap,
+        TrackedType::BTreeSet => Ctor::BTreeSet,
+        TrackedType::BytesMut => Ctor::BytesMut,
+        TrackedType::IndexMap => Ctor::IndexMap,
+        TrackedType::IndexSet => Ctor::IndexSet,
+        TrackedType::DashMap => Ctor::DashMap,
+        TrackedType::SccHashMap => Ctor::SccHashMap,
+        TrackedType::SccHashSet => Ctor::SccHashSet,
+        TrackedType::SccTreeIndex => Ctor::SccTreeIndex,
+        TrackedType::SmallVec => Ctor::SmallVec,
+    }
+}
 
 /// The `with_capacity_and_hasher` symbol — not in rustc predefined set, so we
 /// intern it on first use.  We use a `std::sync::OnceLock` so we don't call
@@ -139,8 +261,16 @@ pub(crate) fn sym_with_capacity_and_hasher() -> Symbol {
 }
 
 /// Return true if `name` is one of the constructor method names we track.
+///
+/// `sym::Default` (the interned string `"default"`) is included because
+/// `Vec::default()` / `HashMap::default()` are zero-capacity constructors
+/// equivalent to `new()`.  The capacity lint handles them the same as `new()`
+/// (capacity = 0).
 pub(crate) fn is_tracked_method(name: Symbol) -> bool {
-    name == sym::new || name == sym::with_capacity || name == sym_with_capacity_and_hasher()
+    name == sym::new
+        || name == sym::with_capacity
+        || name == sym_with_capacity_and_hasher()
+        || name == sym::Default
 }
 
 // ── Hasher choice (M9) ───────────────────────────────────────────────────────
@@ -372,8 +502,7 @@ impl<'tcx> LateLintPass<'tcx> for CaptrackPgoCapacity {
                 let typeck = cx.typeck_results();
                 let ret_ty = typeck.expr_ty(expr);
                 if let TyKind::Adt(adt_def, _) = ret_ty.kind() {
-                    let diag_name = cx.tcx.get_diagnostic_name(adt_def.did());
-                    if diag_name.is_some_and(|n| TRACKED_TYPES.contains(&n)) {
+                    if recognise_tracked_type(cx, adt_def.did()).is_some() {
                         let call_span = expr.span;
                         if !call_span.from_expansion() {
                             // Method-call form: emit warning only (span extraction
@@ -436,9 +565,8 @@ fn check_call_site<'tcx>(
         if let Some(impl_did) = cx.tcx.impl_of_assoc(def_id) {
             let self_ty = cx.tcx.type_of(impl_did).instantiate_identity();
             if let TyKind::Adt(adt_def, _) = self_ty.kind() {
-                let diag_name = cx.tcx.get_diagnostic_name(adt_def.did());
-                if let Some(type_sym) = diag_name.filter(|n| TRACKED_TYPES.contains(n)) {
-                    let ctor = symbol_to_ctor(type_sym);
+                if let Some(tracked_ty) = recognise_tracked_type(cx, adt_def.did()) {
+                    let ctor = tracked_type_to_ctor(tracked_ty);
                     let cap_expr = extract_cap_expr(cx, method_name, args);
                     // Build PolicyDefaults once per call-site (OnceLock
                     // ensures env vars are read at most once per process).
@@ -477,29 +605,11 @@ fn check_call_site<'tcx>(
     // -----------------------------------------------------------------------
     let ret_ty = typeck.expr_ty(call_expr);
     if let TyKind::Adt(adt_def, _) = ret_ty.kind() {
-        let diag_name = cx.tcx.get_diagnostic_name(adt_def.did());
-        if diag_name.is_some_and(|n| TRACKED_TYPES.contains(&n)) {
+        if recognise_tracked_type(cx, adt_def.did()).is_some() {
             // Strategy B: emit warning only (no suggestion for Default::default()
             // — we'd need to synthesise a type path, deferred to a later milestone).
             emit_warning_only(cx, span, profile);
         }
-    }
-}
-
-/// Map a diagnostic type symbol to our `Ctor` enum.
-fn symbol_to_ctor(sym: Symbol) -> Ctor {
-    if sym == sym::Vec {
-        Ctor::Vec
-    } else if sym == sym::VecDeque {
-        Ctor::VecDeque
-    } else if sym == sym::HashMap {
-        Ctor::HashMap
-    } else if sym == sym::HashSet {
-        Ctor::HashSet
-    } else if sym == sym::BTreeMap {
-        Ctor::BTreeMap
-    } else {
-        Ctor::BTreeSet
     }
 }
 
@@ -509,7 +619,9 @@ fn extract_cap_expr<'tcx>(
     method_name: Symbol,
     args: &'tcx [Expr<'tcx>],
 ) -> CapExpr {
-    if method_name == sym::new {
+    // `new()` and `default()` are zero-capacity constructors.
+    // `sym::Default` is the interned string "default" — the method name from HIR.
+    if method_name == sym::new || method_name == sym::Default {
         return CapExpr::Zero;
     }
     // `with_capacity(K)` and `with_capacity_and_hasher(K, h)` — cap is args[0].
@@ -583,8 +695,8 @@ fn emit_with_suggestion<'tcx>(
         model::Unit::Bytes => "bytes",
     };
 
-    // BTreeMap / BTreeSet have no with_capacity — warn only.
-    if matches!(ctor, Ctor::BTreeMap | Ctor::BTreeSet) {
+    // BTreeMap / BTreeSet / SccTreeIndex have no with_capacity — warn only.
+    if matches!(ctor, Ctor::BTreeMap | Ctor::BTreeSet | Ctor::SccTreeIndex) {
         span_lint(
             cx,
             CAPTRACK_PGO_CAPACITY,
@@ -635,8 +747,20 @@ fn emit_with_suggestion<'tcx>(
             };
 
             // Determine whether we should also inject a new hasher.
-            // Only HashMap and HashSet support `with_capacity_and_hasher`.
-            let inject_hasher = hasher.filter(|_| matches!(ctor, Ctor::HashMap | Ctor::HashSet));
+            // HashMap, HashSet, IndexMap, IndexSet, DashMap, SccHashMap, SccHashSet all
+            // support `with_capacity_and_hasher`.
+            let inject_hasher = hasher.filter(|_| {
+                matches!(
+                    ctor,
+                    Ctor::HashMap
+                        | Ctor::HashSet
+                        | Ctor::IndexMap
+                        | Ctor::IndexSet
+                        | Ctor::DashMap
+                        | Ctor::SccHashMap
+                        | Ctor::SccHashSet
+                )
+            });
 
             let msg = format!(
                 "captrack-pgo: profile shows peak={peak} {unit}, p95={p95}, count={count} \
