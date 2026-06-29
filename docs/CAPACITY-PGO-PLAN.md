@@ -482,3 +482,100 @@ the hasher chosen via `--hasher`).
   `Cargo.toml`. Decision: **warn only**, user manages deps.
 - **Hashing for BTree* / Vec*** — no hasher applies; `--hasher` skips them
   silently.
+
+---
+
+## Path D — capacity policy knobs (planned)
+
+> Path C delivered auto-instrument + apply with hasher; the chosen capacity
+> value was hard-coded to `next_pow2(p95)`. Path D exposes the policy.
+
+### Target user workflow
+
+```bash
+# Defaults: p95, multiplier=1.0, next_pow2 (preserves M9 behaviour exactly)
+captrack-pgo apply --profile p.json --hasher fx
+
+# Never reallocate — capacity = max:
+captrack-pgo apply --profile p.json --cap-from max
+
+# Conservative: median × 2, rounded to next pow2:
+captrack-pgo apply --profile p.json --cap-from median --cap-mul 2.0
+
+# Exact value (no rounding):
+captrack-pgo apply --profile p.json --cap-from p99 --cap-round exact
+```
+
+### Three orthogonal knobs
+
+| Knob | CLI flag | Env var | Values | Default |
+|---|---|---|---|---|
+| Source | `--cap-from` | `CAPTRACK_PGO_CAP_FROM` | `max` \| `mean` \| `median` \| `p95` \| `p99` | `p95` |
+| Multiplier | `--cap-mul` | `CAPTRACK_PGO_CAP_MUL` | float ≥ 0 | `1.0` |
+| Rounding | `--cap-round` | `CAPTRACK_PGO_CAP_ROUND` | `pow2` \| `to8` \| `exact` | `pow2` |
+
+Formula: `cap = round_mode( source_value × multiplier )`.
+
+### Per-site override in profile JSON
+
+The profile entry gains an optional `policy` field:
+
+```json
+{
+  "key": { "file": "...", "line": 42, "col": 13 },
+  "peak": 1024, "mean": 96.4, "p50": 64, "p95": 256, "p99": 512, "count": 100,
+  "policy": { "cap_from": "max", "cap_mul": 1.0, "cap_round": "pow2" }
+}
+```
+
+When `policy` is present, the per-site values **override** the global defaults
+for that one site (each field independently — missing fields fall back to
+global defaults). When `policy` is absent, the global defaults apply.
+
+This allows hot-path sites to ask for `max` while the rest of the workspace
+uses `p95`, without two separate `apply` invocations.
+
+### Profile schema additions
+
+`SiteStats` (both in `captrack-pgo/src/model.rs` and
+`captrack-pgo-lint/src/model.rs`) gains:
+
+- `mean: f64` — arithmetic mean of all samples for the site.
+- `p99: usize` — 99th percentile (nearest-rank).
+- `policy: Option<SitePolicy>` — per-site override.
+
+`captrack-pgo/src/profile/captrack.rs` computes `mean` and `p99` via
+`SampleStats` (already in `src/stats.rs`) during profile loading. The legacy
+dhat backend (`profile/dhat.rs`) cannot produce `mean` per site without
+intermediate aggregation — set both to `peak` (degraded but consistent) and
+note in CHANGELOG.
+
+### Milestones
+
+- **M10 — data model + profile loaders.** Extend `SiteStats` (mean, p99,
+  policy field) in both crates. Update `profile/captrack.rs` to fill
+  `mean`/`p99` via `SampleStats`. JSON schema documented. Profile
+  round-trip tests updated.
+
+- **M11 — plugin rules + CLI flags + docs.** Plugin reads
+  `CAPTRACK_PGO_CAP_FROM`/`CAP_MUL`/`CAP_ROUND` env vars, applies per-site
+  policy override when present, computes proposed cap via the new formula.
+  CLI flags wired in `apply`. `--help` describes each knob with examples.
+  README + CHANGELOG + CLAUDE.md updated.
+
+### Backward compat
+
+- Existing profile JSON without `mean`/`p99`/`policy` fields must still
+  parse. Make new fields `#[serde(default)]`. Default `mean` = `peak as f64`,
+  `p99` = `p95`, `policy` = `None`.
+- Default CLI flags (no `--cap-from` etc.) reproduce the M9 behaviour
+  exactly: `p95 × 1.0` rounded to `pow2`. Zero behavioural diff.
+
+### Open question
+
+- **mean for dhat backend.** dhat exposes per-block byte counts plus
+  call counts; computing a true mean of all observed sizes is not
+  straightforward (dhat aggregates internally). Decision: set
+  `mean = peak as f64` for dhat-loaded profiles and warn in `--help` /
+  README that `--cap-from mean` is only meaningful with the captrack
+  backend.
