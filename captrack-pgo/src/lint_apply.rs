@@ -473,12 +473,55 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
     let before_snapshots = snapshot_rs_files(&args.workspace_root)
         .context("snapshot workspace before dylint")?;
 
+    // ── 2b. Convert captrack dump → Vec<SiteStats> for the lint plugin ─────────
+    //
+    // The lint plugin's loader (`captrack-pgo-lint/src/loader.rs`) expects the
+    // profile to be a JSON array of `SiteStats` objects (the *processed* format
+    // produced by `CaptrackProfile::sites()`).  The raw captrack dump has the
+    // shape `{version, stats: [{name, file, line, column, creation_count,
+    // samples}]}`.  We convert here and write to a temp file so the plugin
+    // receives the correct format via `CAPTRACK_PGO_PROFILE`.
+    let converted_profile_path: PathBuf = {
+        use crate::profile::captrack::CaptrackProfile;
+        use crate::profile::Profile as _;
+
+        let backend = CaptrackProfile::new(&args.profile_path);
+        let site_stats = backend
+            .sites()
+            .with_context(|| format!("convert captrack dump {}", args.profile_path.display()))?;
+
+        // Write the Vec<SiteStats> JSON next to the dump, with a -converted suffix.
+        let stem = args
+            .profile_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("profile");
+        let converted_name = format!("{}-converted.json", stem);
+        let converted_path = args
+            .profile_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&converted_name);
+
+        let json = serde_json::to_string_pretty(&site_stats)
+            .context("serialize converted SiteStats")?;
+        std::fs::write(&converted_path, json.as_bytes())
+            .with_context(|| format!("write converted profile {}", converted_path.display()))?;
+
+        println!(
+            "captrack-pgo: converted {} sites to {} for lint plugin",
+            site_stats.len(),
+            converted_path.display()
+        );
+
+        converted_path
+    };
+
     // ── 3. Run cargo dylint ──────────────────────────────────────────────────
 
-    let abs_profile = args
-        .profile_path
+    let abs_profile = converted_profile_path
         .canonicalize()
-        .with_context(|| format!("canonicalize profile path {}", args.profile_path.display()))?;
+        .with_context(|| format!("canonicalize converted profile path {}", converted_profile_path.display()))?;
 
     // Build the dylint command.
     //
@@ -502,6 +545,11 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
     cmd.arg("--");
     cmd.arg("--manifest-path");
     cmd.arg(&workspace_cargo_toml);
+    // `--all-targets` ensures the lint runs on every compilation unit,
+    // bypassing incremental-cache hits that would suppress lint output from
+    // units compiled in previous runs with a different CAPTRACK_PGO_PROFILE.
+    // Without this, rustc reuses cached artifacts and the plugin never fires.
+    cmd.arg("--all-targets");
     // `--allow-dirty` is a cargo-fix flag (consumed by the inner `cargo fix`
     // invocation, not by `cargo dylint`), so it MUST follow `--`.
     if args.allow_dirty {
