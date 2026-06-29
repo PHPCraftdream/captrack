@@ -69,8 +69,34 @@ mod inner {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let f = std::fs::File::create(path)?;
-        serde_json::to_writer_pretty(f, &dump).map_err(std::io::Error::other)?;
+        // Atomic write: serialise to `<path>.tmp`, then `rename`.  Rationale:
+        // the periodic autodump tick (captrack/src/autodump.rs) writes a fresh
+        // snapshot every few hundred ms; a `TerminateProcess` / `SIGKILL`
+        // landing between `File::create` (which truncates) and the end of
+        // `to_writer_pretty` would otherwise leave a zero- or partial-byte
+        // file at the destination — destroying the previous successful
+        // snapshot.  `rename` is atomic on POSIX *and* on NTFS for
+        // same-volume moves, so the destination is either the prior tick or
+        // the new one, never a half-written torso.
+        let tmp_path = match path.file_name() {
+            Some(name) => {
+                let mut tmp_name = name.to_os_string();
+                tmp_name.push(".tmp");
+                path.with_file_name(tmp_name)
+            }
+            None => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "dump_capacity_stats: path has no file name",
+            )),
+        };
+        {
+            let f = std::fs::File::create(&tmp_path)?;
+            serde_json::to_writer_pretty(f, &dump).map_err(std::io::Error::other)?;
+            // File handle dropped here flushes the userspace buffer.
+        }
+        // `rename` over an existing destination is allowed on both POSIX and
+        // modern Windows (Rust's std uses MoveFileExW with REPLACE_EXISTING).
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }
