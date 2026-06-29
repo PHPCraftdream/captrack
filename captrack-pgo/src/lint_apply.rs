@@ -329,6 +329,77 @@ impl HasherChoice {
     }
 }
 
+// ── Capacity policy choices (M11) ─────────────────────────────────────────────
+//
+// These mirror `captrack_pgo_lint::model::{CapFrom, CapRound}` so that
+// `captrack-pgo` (stable) does NOT need a direct dependency on
+// `captrack-pgo-lint` (nightly-only).  The variants are kept in sync manually;
+// any new variant must be added here **and** in the plugin model.
+
+/// Which statistic forms the base capacity value.
+///
+/// CLI flag: `--cap-from`.  Env var forwarded to the plugin: `CAPTRACK_PGO_CAP_FROM`.
+/// Default: `P95` (preserves pre-M11 behaviour exactly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapFromChoice {
+    /// Peak observed value (never reallocates; may waste memory on outliers).
+    Max,
+    /// Arithmetic mean.  Only meaningful with captrack-backed profiles.
+    Mean,
+    /// 50th percentile (median).
+    Median,
+    /// 95th percentile (default).
+    #[default]
+    P95,
+    /// 99th percentile.
+    P99,
+}
+
+impl CapFromChoice {
+    /// The string value sent in `CAPTRACK_PGO_CAP_FROM`.
+    ///
+    /// Returns `None` for `P95` (the default) so the env var can be omitted
+    /// when the default is in effect — the plugin defaults to P95 when absent.
+    pub fn env_value(self) -> Option<&'static str> {
+        match self {
+            CapFromChoice::Max => Some("max"),
+            CapFromChoice::Mean => Some("mean"),
+            CapFromChoice::Median => Some("median"),
+            CapFromChoice::P95 => None, // omit — plugin default matches
+            CapFromChoice::P99 => Some("p99"),
+        }
+    }
+}
+
+/// Rounding mode applied after the multiplier.
+///
+/// CLI flag: `--cap-round`.  Env var forwarded to the plugin: `CAPTRACK_PGO_CAP_ROUND`.
+/// Default: `Pow2` (preserves pre-M11 behaviour exactly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapRoundChoice {
+    /// Round up to the next power of two (default).
+    #[default]
+    Pow2,
+    /// Round up to the nearest multiple of 8.
+    To8,
+    /// No rounding; use the exact computed value.
+    Exact,
+}
+
+impl CapRoundChoice {
+    /// The string value sent in `CAPTRACK_PGO_CAP_ROUND`.
+    ///
+    /// Returns `None` for `Pow2` (the default) so the env var can be omitted
+    /// when the default is in effect — the plugin defaults to Pow2 when absent.
+    pub fn env_value(self) -> Option<&'static str> {
+        match self {
+            CapRoundChoice::Pow2 => None, // omit — plugin default matches
+            CapRoundChoice::To8 => Some("to8"),
+            CapRoundChoice::Exact => Some("exact"),
+        }
+    }
+}
+
 /// Arguments for the `apply` subcommand, already resolved (paths
 /// canonicalized, defaults applied).
 pub struct LintApplyArgs {
@@ -339,6 +410,21 @@ pub struct LintApplyArgs {
     pub allow_dirty: bool,
     /// Hasher to inject into HashMap/HashSet constructors.
     pub hasher: HasherChoice,
+    /// Which statistic to use as the base capacity value.
+    ///
+    /// Forwarded to the plugin as `CAPTRACK_PGO_CAP_FROM`.
+    /// Default-variant (`P95`) → env var omitted (plugin default matches).
+    pub cap_from: CapFromChoice,
+    /// Multiplier applied to the source statistic before rounding.
+    ///
+    /// Forwarded to the plugin as `CAPTRACK_PGO_CAP_MUL`.
+    /// Value `1.0` → env var omitted (plugin default matches).
+    pub cap_mul: f64,
+    /// Rounding mode applied after the multiplier.
+    ///
+    /// Forwarded to the plugin as `CAPTRACK_PGO_CAP_ROUND`.
+    /// Default-variant (`Pow2`) → env var omitted (plugin default matches).
+    pub cap_round: CapRoundChoice,
 }
 
 /// Run the `apply` subcommand.
@@ -433,6 +519,23 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
             cmd.env_remove("CAPTRACK_PGO_HASHER");
         }
     }
+    // Forward capacity policy knobs (omit when equal to plugin default to keep
+    // the environment minimal and avoid surprises with pre-M11 plugin versions).
+    match args.cap_from.env_value() {
+        Some(v) => { cmd.env("CAPTRACK_PGO_CAP_FROM", v); }
+        None => { cmd.env_remove("CAPTRACK_PGO_CAP_FROM"); }
+    }
+    // Always set CAP_MUL when it differs from 1.0 (the plugin default).
+    // Use a stable string representation avoiding floating-point noise.
+    if (args.cap_mul - 1.0).abs() > f64::EPSILON {
+        cmd.env("CAPTRACK_PGO_CAP_MUL", args.cap_mul.to_string());
+    } else {
+        cmd.env_remove("CAPTRACK_PGO_CAP_MUL");
+    }
+    match args.cap_round.env_value() {
+        Some(v) => { cmd.env("CAPTRACK_PGO_CAP_ROUND", v); }
+        None => { cmd.env_remove("CAPTRACK_PGO_CAP_ROUND"); }
+    }
 
     // Inherit stdio so the user sees compilation progress / lint output.
     cmd.stdin(std::process::Stdio::null());
@@ -444,8 +547,24 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
             .env_value()
             .map(|v| format!(" CAPTRACK_PGO_HASHER={v}"))
             .unwrap_or_default();
+        let cap_from_env = args
+            .cap_from
+            .env_value()
+            .map(|v| format!(" CAPTRACK_PGO_CAP_FROM={v}"))
+            .unwrap_or_default();
+        let cap_mul_env = if (args.cap_mul - 1.0).abs() > f64::EPSILON {
+            format!(" CAPTRACK_PGO_CAP_MUL={}", args.cap_mul)
+        } else {
+            String::new()
+        };
+        let cap_round_env = args
+            .cap_round
+            .env_value()
+            .map(|v| format!(" CAPTRACK_PGO_CAP_ROUND={v}"))
+            .unwrap_or_default();
         println!(
-            "  CAPTRACK_PGO_PROFILE={}{hasher_env} cargo dylint --path {} -- --manifest-path {}",
+            "  CAPTRACK_PGO_PROFILE={}{hasher_env}{cap_from_env}{cap_mul_env}{cap_round_env} \
+             cargo dylint --path {} -- --manifest-path {}",
             abs_profile.display(),
             args.lint_path.display(),
             workspace_cargo_toml.display()

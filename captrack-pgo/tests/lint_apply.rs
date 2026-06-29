@@ -337,6 +337,226 @@ fn invalid_hasher_value_is_rejected_by_clap() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Capacity policy flag tests (M11) — run unconditionally (dry-run only)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `--cap-from max` in dry-run must mention `CAPTRACK_PGO_CAP_FROM=max` in the
+/// output.
+#[test]
+fn cap_policy_flags_pass_env_vars() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args([
+            "apply", "--dry-run",
+            "--cap-from", "max",
+            "--cap-mul", "1.5",
+            "--cap-round", "exact",
+            "--profile",
+        ])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    assert!(
+        stdout.contains("CAPTRACK_PGO_CAP_FROM=max"),
+        "expected CAPTRACK_PGO_CAP_FROM=max in dry-run stdout; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CAPTRACK_PGO_CAP_MUL=1.5"),
+        "expected CAPTRACK_PGO_CAP_MUL=1.5 in dry-run stdout; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CAPTRACK_PGO_CAP_ROUND=exact"),
+        "expected CAPTRACK_PGO_CAP_ROUND=exact in dry-run stdout; got:\n{stdout}"
+    );
+}
+
+/// Default `--cap-from p95 --cap-mul 1.0 --cap-round pow2` must NOT set
+/// `CAPTRACK_PGO_CAP_FROM`, `CAPTRACK_PGO_CAP_MUL`, or `CAPTRACK_PGO_CAP_ROUND`
+/// env vars (they are omitted when equal to the plugin's own default to keep
+/// the environment minimal).
+#[test]
+fn cap_policy_defaults_omit_env_vars() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args([
+            "apply", "--dry-run",
+            "--cap-from", "p95",
+            "--cap-mul", "1.0",
+            "--cap-round", "pow2",
+            "--profile",
+        ])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    assert!(
+        !stdout.contains("CAPTRACK_PGO_CAP_FROM"),
+        "expected no CAPTRACK_PGO_CAP_FROM for default p95; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("CAPTRACK_PGO_CAP_MUL"),
+        "expected no CAPTRACK_PGO_CAP_MUL for default 1.0; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("CAPTRACK_PGO_CAP_ROUND"),
+        "expected no CAPTRACK_PGO_CAP_ROUND for default pow2; got:\n{stdout}"
+    );
+}
+
+/// `--cap-mul 0.0` must exit non-zero with a clear error.
+#[test]
+fn cap_mul_zero_is_rejected() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--cap-mul", "0.0", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for --cap-mul 0.0"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stderr}{stdout}");
+    assert!(
+        combined.contains("cap-mul") || combined.contains("0"),
+        "expected error about cap-mul; got:\n{combined}"
+    );
+}
+
+/// `--cap-mul -1.0` (negative) must exit non-zero.
+#[test]
+fn cap_mul_negative_is_rejected() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--cap-mul", "-1.0", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for --cap-mul -1.0"
+    );
+}
+
+/// `--cap-from` with an invalid value must exit non-zero.
+#[test]
+fn invalid_cap_from_is_rejected_by_clap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let profile_path = root.join("p.json");
+    std::fs::write(&profile_path, r#"{"version":1,"stats":[]}"#).unwrap();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--cap-from", "p50", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for unknown --cap-from value"
+    );
+}
+
+/// `--cap-round` with an invalid value must exit non-zero.
+#[test]
+fn invalid_cap_round_is_rejected_by_clap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let profile_path = root.join("p.json");
+    std::fs::write(&profile_path, r#"{"version":1,"stats":[]}"#).unwrap();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--cap-round", "round16", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for unknown --cap-round value"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Live tests — require nightly + cargo-dylint; #[ignore] by default.
 //
 // Run with: cargo test --test lint_apply -- --ignored

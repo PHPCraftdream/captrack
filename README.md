@@ -248,7 +248,11 @@ measure-apply loop:
 
    ```text
    captrack-pgo apply --profile profile.json [--workspace <path>] \
-       [--hasher fx|ahash|foldhash|none] [--dry-run]
+       [--hasher fx|ahash|foldhash|none] \
+       [--cap-from max|mean|median|p95|p99] \
+       [--cap-mul <float>] \
+       [--cap-round pow2|to8|exact] \
+       [--dry-run]
    ```
 
    - Without `--hasher` (or `--hasher none`): only capacity hints are updated
@@ -261,6 +265,48 @@ measure-apply loop:
      (captrack-pgo will emit a reminder).
    - Sites with an explicit local type ascription (`let m: HashMap<K, V> = ...`)
      have the hasher injection skipped automatically to avoid compile errors.
+
+   **Capacity policy knobs** (defaults reproduce the pre-M11 behaviour exactly):
+
+   | Flag | Env var | Values | Default |
+   |---|---|---|---|
+   | `--cap-from` | `CAPTRACK_PGO_CAP_FROM` | `max` \| `mean` \| `median` \| `p95` \| `p99` | `p95` |
+   | `--cap-mul` | `CAPTRACK_PGO_CAP_MUL` | any float > 0 | `1.0` |
+   | `--cap-round` | `CAPTRACK_PGO_CAP_ROUND` | `pow2` \| `to8` \| `exact` | `pow2` |
+
+   Formula: `cap = round_mode( source_statistic × cap_mul )`.
+
+   Examples:
+
+   ```bash
+   # Never reallocate (capacity = peak observed value):
+   captrack-pgo apply --profile profile.json --cap-from max
+
+   # Conservative: median × 2, rounded to next power of two:
+   captrack-pgo apply --profile profile.json --cap-from median --cap-mul 2.0
+
+   # Exact 99th-percentile value (no rounding):
+   captrack-pgo apply --profile profile.json --cap-from p99 --cap-round exact
+   ```
+
+   **Per-site policy override in the profile JSON:**
+
+   Individual hot-path sites can override the global policy by adding a `policy`
+   field to their entry in the profile JSON.  Each sub-field is independent;
+   missing ones fall back to the global CLI defaults.
+
+   ```json
+   {
+     "key": { "file": "src/engine.rs", "line": 42, "col": 13 },
+     "peak": 1024, "mean": 96.4, "p50": 64, "p95": 256, "p99": 512, "count": 100,
+     "policy": { "cap_from": "max", "cap_mul": 1.0, "cap_round": "pow2" }
+   }
+   ```
+
+   A site with `"policy": { "cap_from": "max" }` will always use its peak value,
+   regardless of the `--cap-from` flag passed on the command line.  Other fields
+   (`cap_mul`, `cap_round`) not listed in the per-site policy still come from
+   the CLI defaults.
 
    Internally this runs `cargo dylint --fix` with the `captrack-pgo-lint`
    plugin, which resolves collection constructors at the semantic (HIR) level

@@ -26,8 +26,8 @@ mod model;
 mod rules;
 
 use loader::Profile;
-use model::{CapExpr, Ctor, SiteKey};
-use rules::Decision;
+use model::{CapExpr, CapFrom, CapRound, Ctor, SiteKey};
+use rules::{Decision, PolicyDefaults};
 
 pub use instrument::CAPTRACK_PGO_INSTRUMENT;
 
@@ -199,6 +199,95 @@ pub(crate) fn read_hasher_choice() -> Option<HasherChoice> {
     })
 }
 
+// ── Capacity policy env-var readers (M11) ────────────────────────────────────
+
+/// Read `CAPTRACK_PGO_CAP_FROM` once and cache the result.
+///
+/// Accepted values (case-insensitive): `max`, `mean`, `median`, `p95`, `p99`.
+/// Default: `P95`.  Unknown values warn to stderr and fall back to the default.
+pub(crate) fn read_cap_from() -> CapFrom {
+    static CHOICE: OnceLock<CapFrom> = OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        let val = match std::env::var("CAPTRACK_PGO_CAP_FROM") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return CapFrom::P95,
+        };
+        match val.trim().to_ascii_lowercase().as_str() {
+            "max" => CapFrom::Max,
+            "mean" => CapFrom::Mean,
+            "median" => CapFrom::Median,
+            "p95" => CapFrom::P95,
+            "p99" => CapFrom::P99,
+            other => {
+                eprintln!(
+                    "captrack-pgo-lint: unknown CAPTRACK_PGO_CAP_FROM value {:?}; \
+                     known values: max, mean, median, p95, p99 — using p95",
+                    other
+                );
+                CapFrom::P95
+            }
+        }
+    })
+}
+
+/// Read `CAPTRACK_PGO_CAP_MUL` once and cache the result.
+///
+/// Must be a positive finite float.  Default: `1.0`.  Invalid or non-positive
+/// values warn to stderr and fall back to `1.0`.
+pub(crate) fn read_cap_mul() -> f64 {
+    static CHOICE: OnceLock<f64> = OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        let val = match std::env::var("CAPTRACK_PGO_CAP_MUL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return 1.0,
+        };
+        match val.trim().parse::<f64>() {
+            Ok(v) if v > 0.0 && v.is_finite() => v,
+            Ok(v) => {
+                eprintln!(
+                    "captrack-pgo-lint: CAPTRACK_PGO_CAP_MUL value {:?} must be > 0 and finite — using 1.0",
+                    v
+                );
+                1.0
+            }
+            Err(_) => {
+                eprintln!(
+                    "captrack-pgo-lint: could not parse CAPTRACK_PGO_CAP_MUL {:?} as f64 — using 1.0",
+                    val.trim()
+                );
+                1.0
+            }
+        }
+    })
+}
+
+/// Read `CAPTRACK_PGO_CAP_ROUND` once and cache the result.
+///
+/// Accepted values (case-insensitive): `pow2`, `to8`, `exact`.
+/// Default: `Pow2`.  Unknown values warn to stderr and fall back to the default.
+pub(crate) fn read_cap_round() -> CapRound {
+    static CHOICE: OnceLock<CapRound> = OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        let val = match std::env::var("CAPTRACK_PGO_CAP_ROUND") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return CapRound::Pow2,
+        };
+        match val.trim().to_ascii_lowercase().as_str() {
+            "pow2" => CapRound::Pow2,
+            "to8" => CapRound::To8,
+            "exact" => CapRound::Exact,
+            other => {
+                eprintln!(
+                    "captrack-pgo-lint: unknown CAPTRACK_PGO_CAP_ROUND value {:?}; \
+                     known values: pow2, to8, exact — using pow2",
+                    other
+                );
+                CapRound::Pow2
+            }
+        }
+    })
+}
+
 /// Determine whether the enclosing `let` binding has an explicit type
 /// ascription that resolves to `HashMap` or `HashSet`.
 ///
@@ -351,6 +440,13 @@ fn check_call_site<'tcx>(
                 if let Some(type_sym) = diag_name.filter(|n| TRACKED_TYPES.contains(n)) {
                     let ctor = symbol_to_ctor(type_sym);
                     let cap_expr = extract_cap_expr(cx, method_name, args);
+                    // Build PolicyDefaults once per call-site (OnceLock
+                    // ensures env vars are read at most once per process).
+                    let policy_defaults = PolicyDefaults {
+                        cap_from: read_cap_from(),
+                        cap_mul: read_cap_mul(),
+                        cap_round: read_cap_round(),
+                    };
                     emit_with_suggestion(
                         cx,
                         call_expr,
@@ -362,6 +458,7 @@ fn check_call_site<'tcx>(
                         span,
                         profile,
                         read_hasher_choice(),
+                        policy_defaults,
                     );
                     return;
                 }
@@ -474,6 +571,7 @@ fn emit_with_suggestion<'tcx>(
     span: rustc_span::Span,
     profile: &Profile,
     hasher: Option<HasherChoice>,
+    policy_defaults: PolicyDefaults,
 ) {
     let key = span_to_site_key(cx, span);
     let Some(stats) = profile.get(&key) else {
@@ -504,7 +602,7 @@ fn emit_with_suggestion<'tcx>(
     }
 
     // Run the capacity-decision rules.
-    let decision = rules::propose_cap(stats, cap_expr);
+    let decision = rules::propose_cap(stats, cap_expr, policy_defaults);
 
     match decision {
         Decision::Skip { reason } => {

@@ -222,10 +222,7 @@ mod tests {
 
     #[test]
     fn cap_from_serde_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&CapFrom::Max).unwrap(),
-            r#""max""#
-        );
+        assert_eq!(serde_json::to_string(&CapFrom::Max).unwrap(), r#""max""#);
         assert_eq!(
             serde_json::from_str::<CapFrom>(r#""p99""#).unwrap(),
             CapFrom::P99
@@ -246,10 +243,7 @@ mod tests {
 
     #[test]
     fn cap_round_serde_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&CapRound::Pow2).unwrap(),
-            r#""pow2""#
-        );
+        assert_eq!(serde_json::to_string(&CapRound::Pow2).unwrap(), r#""pow2""#);
         assert_eq!(
             serde_json::from_str::<CapRound>(r#""to8""#).unwrap(),
             CapRound::To8

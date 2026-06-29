@@ -125,21 +125,25 @@ pub trait IntoInner: Sized {
 ## captrack-pgo — profile-guided capacity optimization CLI
 
 `captrack-pgo/` is a separate bin-crate in the workspace (not part of the
-captrack library).  Its pipeline as of M5 (Path-B migration, 2026-06-28):
+captrack library).  Its pipeline as of M11 (2026-06-29):
 
 ```
 captrack dump (profile.json)
         │
         ▼
-captrack-pgo apply --profile profile.json [--hasher fx|ahash|foldhash|none]
-        │  sets CAPTRACK_PGO_PROFILE (and optionally CAPTRACK_PGO_HASHER) env var
+captrack-pgo apply --profile profile.json
+    [--hasher fx|ahash|foldhash|none]
+    [--cap-from max|mean|median|p95|p99]   (default: p95)
+    [--cap-mul <float>]                    (default: 1.0)
+    [--cap-round pow2|to8|exact]           (default: pow2)
+        │  sets CAPTRACK_PGO_PROFILE (and optionally CAPTRACK_PGO_HASHER,
+        │  CAPTRACK_PGO_CAP_FROM, CAPTRACK_PGO_CAP_MUL, CAPTRACK_PGO_CAP_ROUND)
         ▼
 cargo dylint --path captrack-pgo-lint --fix
         │  HIR-level semantic detection + rustfix suggestions
-        │  • capacity rewrite: Vec::new() → Vec::with_capacity(N)
-        │  • hasher swap (when CAPTRACK_PGO_HASHER set):
-        │      HashMap::new() → HashMap::with_capacity_and_hasher(N, ::fxhash::FxBuildHasher::default())
-        │      (skipped for sites with explicit let-binding type ascription)
+        │  • capacity rewrite using formula: round_mode(source_stat × cap_mul)
+        │  • hasher swap (when CAPTRACK_PGO_HASHER set)
+        │  • per-site policy overrides from profile JSON `policy` field
         ▼
 source files rewritten in place
         │
@@ -149,6 +153,25 @@ last-apply.json  (before/after snapshot manifest)
         ▼
 captrack-pgo undo  (restores files from manifest)
 ```
+
+### Capacity policy knobs (M11)
+
+Three env vars control the capacity formula:
+
+| Env var | CLI flag | Default | Notes |
+|---|---|---|---|
+| `CAPTRACK_PGO_CAP_FROM` | `--cap-from` | `p95` | Statistic: max/mean/median/p95/p99 |
+| `CAPTRACK_PGO_CAP_MUL` | `--cap-mul` | `1.0` | Multiplier (float > 0) |
+| `CAPTRACK_PGO_CAP_ROUND` | `--cap-round` | `pow2` | Rounding: pow2/to8/exact |
+
+The default values (`P95 × 1.0, Pow2`) reproduce the pre-M11 `next_pow2(p95)` formula exactly.
+Default-variant values cause `run_lint_apply` to **omit** the env var (removal) so the plugin
+defaults match; only non-default values are forwarded.
+
+Per-site `policy` fields in the profile JSON override individual globals.  The `PolicyDefaults`
+struct (in `captrack-pgo-lint/src/rules.rs`) is constructed from `OnceLock`-cached readers
+(`read_cap_from`, `read_cap_mul`, `read_cap_round`) and passed to `propose_cap` as an argument
+(pure function — no I/O inside `propose_cap`).
 
 ### Hasher swap (M9)
 
@@ -174,8 +197,8 @@ the suggestion (documented limitation).
 
 | Module | Purpose |
 |---|---|
-| `src/cli.rs` | Five subcommands: `measure` (stub), `apply` (Dylint orchestration + `--hasher`), `instrument`, `undo`, `uninstrument` |
-| `src/lint_apply.rs` | Core of `apply`: `LintApplyArgs` (incl. `hasher: HasherChoice`), `HasherChoice` enum, pre-flight, snapshot before, run `cargo dylint --fix` with env vars, diff and write manifest; also `undo_lint_apply` |
+| `src/cli.rs` | Five subcommands: `measure` (stub), `apply` (Dylint orchestration + `--hasher` + `--cap-from/mul/round`), `instrument`, `undo`, `uninstrument` |
+| `src/lint_apply.rs` | Core of `apply`: `LintApplyArgs` (incl. `hasher`, `cap_from`, `cap_mul`, `cap_round`), `HasherChoice`/`CapFromChoice`/`CapRoundChoice` enums, pre-flight, snapshot before, run `cargo dylint --fix` with env vars, diff and write manifest; also `undo_lint_apply` |
 | `src/model.rs` | `SiteKey`, `SiteStats`, `Unit` — used by profile loaders |
 | `src/profile/mod.rs` | `trait Profile { fn sites() -> Vec<SiteStats> }` |
 | `src/profile/captrack.rs` | Parses `captrack::dump_capacity_stats` JSON output |

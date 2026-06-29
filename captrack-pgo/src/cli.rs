@@ -13,7 +13,7 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::lint_apply::{self, HasherChoice};
+use crate::lint_apply::{self, CapFromChoice, CapRoundChoice, HasherChoice};
 use crate::lint_instrument;
 
 #[derive(Parser, Debug)]
@@ -78,6 +78,35 @@ pub enum Command {
         /// Cargo.toml manually; captrack-pgo emits a reminder after apply.
         #[arg(long, value_name = "HASHER", default_value = "none", value_parser = parse_hasher)]
         hasher: HasherChoice,
+
+        /// Source statistic used as the base capacity value.
+        ///
+        /// max    — peak observed value; guarantees zero reallocations but may
+        ///          waste memory when outliers are rare.
+        /// mean   — arithmetic mean.  Only meaningful with captrack-backed profiles;
+        ///          dhat-loaded profiles set mean=peak.
+        /// median — 50th percentile (p50).
+        /// p95    — 95th percentile (default; covers 95% of cases with less waste
+        ///          than max).
+        /// p99    — 99th percentile.
+        #[arg(long, default_value = "p95", value_parser = parse_cap_from)]
+        cap_from: CapFromChoice,
+
+        /// Multiplier applied to the source statistic before rounding.
+        ///
+        /// Examples: --cap-from median --cap-mul 2.0 uses median×2.
+        /// Must be > 0.0.  Default: 1.0.
+        #[arg(long, default_value = "1.0")]
+        cap_mul: f64,
+
+        /// Rounding mode applied after the multiplier.
+        ///
+        /// pow2  — round up to the next power of two (default; matches Vec
+        ///         doubling strategy and is cache-friendly).
+        /// to8   — round up to the nearest multiple of 8.
+        /// exact — no rounding; use the exact computed value (truncated to usize).
+        #[arg(long, default_value = "pow2", value_parser = parse_cap_round)]
+        cap_round: CapRoundChoice,
     },
 
     /// Auto-instrument every bare std collection constructor with
@@ -159,6 +188,34 @@ fn parse_hasher(s: &str) -> Result<HasherChoice, String> {
     }
 }
 
+/// Clap value_parser for `--cap-from`.
+fn parse_cap_from(s: &str) -> Result<CapFromChoice, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "max" => Ok(CapFromChoice::Max),
+        "mean" => Ok(CapFromChoice::Mean),
+        "median" => Ok(CapFromChoice::Median),
+        "p95" => Ok(CapFromChoice::P95),
+        "p99" => Ok(CapFromChoice::P99),
+        other => Err(format!(
+            "unknown cap-from {:?}; accepted values: max, mean, median, p95, p99",
+            other
+        )),
+    }
+}
+
+/// Clap value_parser for `--cap-round`.
+fn parse_cap_round(s: &str) -> Result<CapRoundChoice, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "pow2" => Ok(CapRoundChoice::Pow2),
+        "to8" => Ok(CapRoundChoice::To8),
+        "exact" => Ok(CapRoundChoice::Exact),
+        other => Err(format!(
+            "unknown cap-round {:?}; accepted values: pow2, to8, exact",
+            other
+        )),
+    }
+}
+
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Measure { bench } => {
@@ -171,8 +228,21 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             allow_dirty,
             hasher,
+            cap_from,
+            cap_mul,
+            cap_round,
         } => {
-            run_apply(profile, lint_path, workspace, dry_run, allow_dirty, hasher)?;
+            // Pre-flight: cap_mul must be positive and finite.
+            if cap_mul <= 0.0 || !cap_mul.is_finite() {
+                return Err(anyhow::anyhow!(
+                    "--cap-mul must be > 0.0 and finite; got {}",
+                    cap_mul
+                ));
+            }
+            run_apply(
+                profile, lint_path, workspace, dry_run, allow_dirty, hasher,
+                cap_from, cap_mul, cap_round,
+            )?;
         }
         Command::Instrument {
             lint_path,
@@ -199,6 +269,9 @@ fn run_apply(
     dry_run: bool,
     allow_dirty: bool,
     hasher: HasherChoice,
+    cap_from: CapFromChoice,
+    cap_mul: f64,
+    cap_round: CapRoundChoice,
 ) -> anyhow::Result<()> {
     use crate::workspace as ws;
 
@@ -224,6 +297,9 @@ fn run_apply(
         dry_run,
         allow_dirty,
         hasher,
+        cap_from,
+        cap_mul,
+        cap_round,
     })
 }
 

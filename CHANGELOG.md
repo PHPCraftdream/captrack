@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+### `captrack-pgo` — M11: capacity policy knobs (`--cap-from`, `--cap-mul`, `--cap-round`)
+
+**Three new flags on `captrack-pgo apply`** expose the formula used to compute
+the proposed capacity value.  Defaults are chosen to reproduce M9 behaviour
+exactly (zero behavioural diff when flags are omitted).
+
+| Flag | Env var | Values | Default |
+|---|---|---|---|
+| `--cap-from` | `CAPTRACK_PGO_CAP_FROM` | `max` \| `mean` \| `median` \| `p95` \| `p99` | `p95` |
+| `--cap-mul` | `CAPTRACK_PGO_CAP_MUL` | float > 0 | `1.0` |
+| `--cap-round` | `CAPTRACK_PGO_CAP_ROUND` | `pow2` \| `to8` \| `exact` | `pow2` |
+
+Formula: `cap = round_mode( source_statistic × cap_mul )`.
+
+**Per-site policy override** — profile JSON entries may carry an optional
+`policy` field.  Fields present in the per-site policy override the
+corresponding CLI defaults for that one site; absent fields fall back to globals.
+This allows hot-path sites to use `max` while the rest of the workspace uses
+`p95`, without two separate `apply` invocations.
+
+**Plugin changes (`captrack-pgo-lint`):**
+
+- New `PolicyDefaults` struct: `{ cap_from: CapFrom, cap_mul: f64, cap_round:
+  CapRound }` constructed once per compiler process from `OnceLock`-cached env
+  var readers (`read_cap_from`, `read_cap_mul`, `read_cap_round`).
+- `propose_cap` signature extended: `propose_cap(stats, current, globals:
+  PolicyDefaults) -> Decision`.  Per-site `stats.policy` fields override
+  individual `globals` fields; invalid `cap_mul` (≤ 0 or NaN) is clamped to 1.0.
+- `CapFrom` and `CapRound` (from M10 model) are now consumed in the rule logic.
+- New unit tests (rules module): `cap_from_max_uses_peak`,
+  `cap_from_median_with_mul_2`, `cap_from_p99_falls_back_to_p95_when_none`,
+  `cap_from_mean_falls_back_to_peak_when_none`, `cap_round_exact_no_rounding`,
+  `per_site_policy_overrides_global_cap_from`, `per_site_policy_overrides_global_cap_round`,
+  `cap_mul_zero_degrades_to_one`, `cap_round_to8_boundary`.
+
+**CLI changes (`captrack-pgo`):**
+
+- `Apply` subcommand gains `--cap-from`, `--cap-mul`, `--cap-round` arguments.
+- New `CapFromChoice` and `CapRoundChoice` enums in `lint_apply.rs` (local
+  mirrors of the plugin model — `captrack-pgo` remains stable-only).
+- `LintApplyArgs` gains `cap_from: CapFromChoice`, `cap_mul: f64`,
+  `cap_round: CapRoundChoice` fields.
+- `run_lint_apply` forwards choices as env vars; default-variant values are
+  omitted (env var removed) to keep the environment minimal.
+- `--dry-run` output includes `CAPTRACK_PGO_CAP_FROM=<value>` etc. when set to
+  non-default values.
+- Pre-flight check: `--cap-mul <= 0.0` or NaN exits with a clear error before
+  touching any files.
+- New integration tests: `cap_policy_flags_pass_env_vars`,
+  `cap_policy_defaults_omit_env_vars`, `cap_mul_zero_is_rejected`,
+  `cap_mul_negative_is_rejected`, `invalid_cap_from_is_rejected_by_clap`,
+  `invalid_cap_round_is_rejected_by_clap`.
+
+---
+
 ### `captrack-pgo` — M9: `--hasher` flag in `apply`
 
 **`captrack-pgo apply` now accepts `--hasher <fx|ahash|foldhash|none>`.**
