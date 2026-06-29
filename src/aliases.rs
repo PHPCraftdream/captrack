@@ -59,6 +59,8 @@ pub type TrackedBTreeMap<K, V> = std::collections::BTreeMap<K, V>;
 pub type TrackedBTreeSet<T> = std::collections::BTreeSet<T>;
 pub type TrackedHashMap<K, V, S = crate::CapHasher> = std::collections::HashMap<K, V, S>;
 pub type TrackedHashSet<T, S = crate::CapHasher> = std::collections::HashSet<T, S>;
+pub type TrackedString = std::string::String;
+pub type TrackedBinaryHeap<T> = std::collections::BinaryHeap<T>;
 
 // ── Optional third-party types ───────────────────────────────────────────────
 //
@@ -90,3 +92,7 @@ pub type TrackedSccTreeIndex<K, V> = ::scc::TreeIndex<K, V>;
 
 #[cfg(feature = "smallvec")]
 pub type TrackedSmallVec<A> = ::smallvec::SmallVec<A>;
+
+#[cfg(feature = "hashbrown")]
+pub type TrackedHashbrownMap<K, V, S = ::hashbrown::hash_map::DefaultHashBuilder> =
+    ::hashbrown::HashMap<K, V, S>;

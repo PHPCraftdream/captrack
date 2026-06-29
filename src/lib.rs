@@ -88,6 +88,9 @@ pub mod hasher;
 pub mod cap_inspect;
 
 #[cfg(feature = "telemetry")]
+pub mod reservoir;
+
+#[cfg(feature = "telemetry")]
 pub mod registry;
 
 pub mod dump;
@@ -125,9 +128,10 @@ pub use stats::SampleStats;
 
 #[cfg(feature = "telemetry")]
 pub use tracked::{
-    TrackedBTreeMap, TrackedBTreeSet, TrackedBytesMut, TrackedDashMap, TrackedHashMap,
-    TrackedHashSet, TrackedIndexMap, TrackedIndexSet, TrackedSccHashMap, TrackedSccHashSet,
-    TrackedSccTreeIndex, TrackedSmallVec, TrackedVec, TrackedVecDeque,
+    TrackedBTreeMap, TrackedBTreeSet, TrackedBinaryHeap, TrackedBytesMut, TrackedDashMap,
+    TrackedHashMap, TrackedHashSet, TrackedHashbrownMap, TrackedIndexMap, TrackedIndexSet,
+    TrackedSccHashMap, TrackedSccHashSet, TrackedSccTreeIndex, TrackedSmallVec, TrackedString,
+    TrackedVec, TrackedVecDeque,
 };
 
 #[cfg(not(feature = "telemetry"))]
@@ -176,6 +180,22 @@ pub trait IntoInner: Sized {
 }
 
 // ── Identity impls for always-available std types ──────────────────────────
+
+impl IntoInner for std::string::String {
+    type Inner = std::string::String;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
+impl<T: std::cmp::Ord> IntoInner for std::collections::BinaryHeap<T> {
+    type Inner = std::collections::BinaryHeap<T>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
 
 impl<T> IntoInner for std::vec::Vec<T> {
     type Inner = std::vec::Vec<T>;
@@ -316,8 +336,17 @@ impl<A: ::smallvec::Array> IntoInner for ::smallvec::SmallVec<A> {
     }
 }
 
+#[cfg(any(feature = "hashbrown", feature = "telemetry"))]
+impl<K, V, S> IntoInner for ::hashbrown::HashMap<K, V, S> {
+    type Inner = ::hashbrown::HashMap<K, V, S>;
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
-// 13 call-site macros
+// 16 call-site macros (was 13)
 //
 // ARCHITECTURE NOTE — unified vs dual-branch macros:
 //
@@ -1379,6 +1408,124 @@ macro_rules! tsmallvec {
 macro_rules! tsmallvec {
     ($name:literal, $cap:expr) => {
         $crate::TrackedSmallVec::<_>::with_capacity_named($cap, $name, file!(), line!(), column!())
+    };
+}
+
+// ── tstring! ─────────────────────────────────────────────────────────────────
+
+/// Create a `String` (off-feature) or `TrackedString` (on-feature) with the
+/// given capacity.
+///
+/// `String` is capacity-bearing (like `Vec<u8>` internally) and one of the
+/// most frequent allocating types in any Rust codebase.
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tstring;
+/// let mut s = tstring!("my/string", 64);
+/// s.push_str("hello");
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tstring {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::std::string::String::with_capacity($cap)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tstring {
+    ($name:literal, $cap:expr) => {
+        $crate::TrackedString::with_capacity_named($cap, $name, file!(), line!(), column!())
+    };
+}
+
+// ── thashbrownmap! ───────────────────────────────────────────────────────────
+
+/// `hashbrown::HashMap` with default hasher — direct hashbrown dep.
+///
+/// Requires the `hashbrown` crate as a direct dependency of your crate.
+/// Supports `;`-arm for per-call hasher override.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use captrack::thashbrownmap;
+/// let mut m = thashbrownmap!("my/hbmap", 16);
+/// m.insert(1u32, 2u32);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! thashbrownmap {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::hashbrown::HashMap::with_capacity($cap)
+        }
+    }};
+    ($name:literal, $cap:expr; $hasher:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::hashbrown::HashMap::with_capacity_and_hasher($cap, $hasher)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! thashbrownmap {
+    ($name:literal, $cap:expr) => {
+        $crate::TrackedHashbrownMap::<_, _>::with_capacity_named($cap, $name, file!(), line!(), column!())
+    };
+    ($name:literal, $cap:expr; $hasher:expr) => {
+        $crate::TrackedHashbrownMap::with_capacity_and_hasher_named(
+            $cap,
+            $hasher,
+            $name,
+            file!(),
+            line!(),
+            column!(),
+        )
+    };
+}
+
+// ── tbinaryheap! ─────────────────────────────────────────────────────────────
+
+/// Create a `BinaryHeap<T>` (off-feature) or `TrackedBinaryHeap<T>` (on-feature)
+/// with the given capacity.
+///
+/// # Examples
+///
+/// ```
+/// # use captrack::tbinaryheap;
+/// let mut h = tbinaryheap!("my/heap", 32);
+/// h.push(42u32);
+/// ```
+#[cfg(not(feature = "telemetry"))]
+#[macro_export]
+macro_rules! tbinaryheap {
+    ($name:literal, $cap:expr) => {{
+        let _: &'static str = $name;
+        {
+            #[allow(clippy::disallowed_methods)]
+            ::std::collections::BinaryHeap::with_capacity($cap)
+        }
+    }};
+}
+
+#[cfg(feature = "telemetry")]
+#[macro_export]
+macro_rules! tbinaryheap {
+    ($name:literal, $cap:expr) => {
+        $crate::TrackedBinaryHeap::<_>::with_capacity_named($cap, $name, file!(), line!(), column!())
     };
 }
 

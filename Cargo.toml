@@ -34,7 +34,7 @@ default = []
 # Axis 1: telemetry on/off
 # Enables TrackedX wrappers, global registry, and JSON dump.
 # Without this feature all macros expand to bare constructors with zero overhead.
-telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap", "dep:ctor", "dep:smallvec"]
+telemetry = ["dep:scc", "dep:serde", "dep:serde_json", "dep:bytes", "dep:indexmap", "dep:dashmap", "dep:ctor", "dep:smallvec", "dep:fastrand", "dep:hashbrown"]
 
 # Axis 2A: default hasher (select at most one; default = RandomState)
 fxhash     = ["dep:fxhash"]
@@ -46,11 +46,12 @@ rustc-hash = ["dep:rustc-hash"]
 # Consumers add e.g. `captrack = { features = ["bytes"] }` to get `TrackedBytesMut`
 # as a type alias to `bytes::BytesMut` in off-feature mode.
 # (When `telemetry` is active these are redundant — the real Tracked* structs win.)
-bytes    = ["dep:bytes"]
-indexmap = ["dep:indexmap"]
-dashmap  = ["dep:dashmap"]
-scc      = ["dep:scc"]
-smallvec = ["dep:smallvec"]
+bytes     = ["dep:bytes"]
+indexmap  = ["dep:indexmap"]
+dashmap   = ["dep:dashmap"]
+scc       = ["dep:scc"]
+smallvec  = ["dep:smallvec"]
+hashbrown = ["dep:hashbrown"]
 
 [dependencies]
 captrack-macros = { path = "captrack-macros", version = "0.1.0" }
@@ -61,6 +62,7 @@ serde      = { version = "1",    optional = true, features = ["derive"] }
 serde_json = { version = "1",    optional = true }
 # On-exit auto-dump hook (only active with `telemetry`).
 ctor       = { version = "0.2",  optional = true }
+fastrand   = { version = "2",    optional = true }
 
 # Optional collection deps — callers bring their own; listed here so that
 # off-feature macro expansions can reference the types in doc-examples and
@@ -69,6 +71,7 @@ bytes      = { version = "1",    optional = true }
 indexmap   = { version = "2",    optional = true }
 dashmap    = { version = "6",    optional = true }
 smallvec   = { version = "1",    optional = true }
+hashbrown  = { version = "0.15", optional = true }
 
 # Hasher backends (optional, axis 2A)
 fxhash     = { version = "0.2",  optional = true }
@@ -89,6 +92,7 @@ bytes      = "1"
 indexmap   = "2"
 dashmap    = "6"
 smallvec   = "1"
+hashbrown  = "0.15"
 serde_json = "1"
 tempfile   = "3"
 fxhash     = "0.2"

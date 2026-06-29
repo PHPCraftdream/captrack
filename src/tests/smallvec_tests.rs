@@ -17,13 +17,8 @@ fn peak(name: &'static str) -> usize {
     let mut m = 0;
     registry::registry().scan(|_, stats| {
         if stats.name == name {
-            let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
-                v.push(x);
-                v
-            });
-            for &s in &samples {
-                stats.samples.push(s);
-            }
+            // Reservoir::snapshot() is non-destructive — no push-back needed.
+            let samples = stats.samples.snapshot();
             if let Some(&max_here) = samples.iter().max() {
                 m = m.max(max_here);
             }

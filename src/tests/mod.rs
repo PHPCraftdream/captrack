@@ -12,10 +12,25 @@ pub mod per_call_override_tests;
 pub mod on_feature_tests;
 
 #[cfg(feature = "telemetry")]
+pub mod reservoir_tests;
+
+#[cfg(feature = "telemetry")]
 pub mod smallvec_tests;
 
 #[cfg(feature = "telemetry")]
 pub mod wrap_from_tests;
+
+#[cfg(feature = "telemetry")]
+pub mod string_tests;
+
+#[cfg(feature = "telemetry")]
+pub mod hashbrown_hashmap_tests;
+
+#[cfg(feature = "telemetry")]
+pub mod binary_heap_tests;
+
+#[cfg(feature = "telemetry")]
+pub mod creation_count_tests;
 
 #[cfg(feature = "fxhash")]
 pub mod fxhash_tests;

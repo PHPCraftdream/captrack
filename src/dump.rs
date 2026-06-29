@@ -24,7 +24,14 @@ mod inner {
         line: u32,
         column: u32,
         creation_count: u64,
+        /// Reservoir snapshot — at most CAPTRACK_SAMPLE_CAP elements.
+        /// Statistically representative subset of all observed capacity values.
         samples: Vec<usize>,
+        /// Total number of capacity observations (including evicted reservoir
+        /// entries).  Always >= samples.len().  Consumers use this for correct
+        /// percentile scaling when samples.len() < total_observed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_observed: Option<u64>,
     }
 
     #[derive(Serialize)]
@@ -34,15 +41,9 @@ mod inner {
     }
 
     fn entry_from((file, line, column): (&'static str, u32, u32), stats: &CapStats) -> Entry {
-        // scc::Bag has no non-destructive shared-reference iterator, so we drain
-        // via pop_all and push all values back to leave the bag intact between dumps.
-        let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
-            v.push(x);
-            v
-        });
-        for &s in &samples {
-            stats.samples.push(s);
-        }
+        // Reservoir snapshot — non-destructive read, no push-back needed.
+        let samples = stats.samples.snapshot();
+        let total_observed = stats.samples.total_observed();
         Entry {
             name: stats.name,
             file,
@@ -50,6 +51,7 @@ mod inner {
             column,
             creation_count: stats.creation_count.load(Ordering::Relaxed),
             samples,
+            total_observed: Some(total_observed),
         }
     }
 

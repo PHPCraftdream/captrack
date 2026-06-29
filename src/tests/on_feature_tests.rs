@@ -24,15 +24,8 @@ fn peak(name: &'static str) -> usize {
     let mut m = 0;
     registry::registry().scan(|_, stats| {
         if stats.name == name {
-            // scc::Bag has no non-destructive shared-reference iterator; drain and
-            // push back to keep the bag intact.
-            let samples: Vec<usize> = stats.samples.pop_all(Vec::new(), |mut v, x| {
-                v.push(x);
-                v
-            });
-            for &s in &samples {
-                stats.samples.push(s);
-            }
+            // Reservoir::snapshot() is non-destructive — no push-back needed.
+            let samples = stats.samples.snapshot();
             if let Some(&max_here) = samples.iter().max() {
                 m = m.max(max_here);
             }
@@ -188,6 +181,15 @@ fn dump_writes_valid_json() {
     assert!(
         our_entry["creation_count"].as_u64().unwrap_or(0) >= 1,
         "creation_count for on/dump must be >= 1"
+    );
+    // total_observed must be present and >= samples count.
+    let total_observed = our_entry["total_observed"]
+        .as_u64()
+        .expect("total_observed must be present as a u64");
+    assert!(
+        total_observed >= our_samples.len() as u64,
+        "total_observed ({total_observed}) must be >= samples.len() ({})",
+        our_samples.len()
     );
 }
 

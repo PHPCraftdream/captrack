@@ -2,8 +2,28 @@
 // feature.
 //
 // Stores per call-site location:
-//   • creation_count — total number of instances created (AtomicU64).
-//   • samples        — raw capacity/len recorded on every Drop or into_iter.
+//   • creation_count — total number of instances **constructed** at this site
+//                      (AtomicU64).  Incremented exactly once per construction
+//                      via `record_creation` or `record_initial`.
+//   • samples        — bounded reservoir of capacity/len observations (Vitter
+//                      Algorithm R, default 4096).  Updated on every Drop,
+//                      into_iter, or cap_inspect call via `record_sample`.
+//
+// # Semantic invariants
+//
+//   creation_count  = number of times the type was constructed at this site.
+//   total_observed  = samples.total_observed() = total capacity observations
+//                     (every Drop / into_iter / cap_inspect call increments this).
+//
+// For a **safe-only** binding (wrap_from + only safe usages like push / len /
+// &v + Drop):
+//   creation_count == 1, total_observed == 1 (Drop sample only).
+//
+// For a **mixed** binding (1 wrap_from + N cap_inspect consumption points + Drop):
+//   creation_count == 1, total_observed >= N + 1.
+//
+// For a **t*_owned!** binding (returns a bare type — Drop is NOT tracked):
+//   creation_count == 1, total_observed == 1 (construction sample only).
 //
 // The registry is a lock-free `scc::HashMap` keyed by (file, line, column) so
 // that each call-site in source code = one distinct entry.
@@ -11,29 +31,42 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+use crate::reservoir::Reservoir;
+
 /// Per-location capacity statistics accumulated over the lifetime of the process.
 ///
-/// # `creation_count` vs `samples.len()`
+/// # Semantic invariants
 ///
-/// `creation_count` counts every call to the constructor (incremented on
-/// creation).  `samples` accumulates one entry per `Drop` or `into_iter` call.
-/// In steady state these counts match, but they can diverge:
+/// `creation_count` is incremented exactly once per construction event
+/// (`wrap_from`, `with_capacity_named`, `t*!` / `t*_owned!` macros).
+/// `cap_inspect_at` (Phase L injection at consumption points) does **not**
+/// touch `creation_count`.
 ///
-/// * **In-flight instances** — created but not yet dropped push to
-///   `creation_count` without yet pushing to `samples`.
-/// * **`std::mem::forget`** — the wrapper is consumed without running Drop,
-///   so no sample is recorded.
-/// * **Panic in Drop** — the Drop impl is aborted before `record_sample`
-///   is reached.
+/// `samples.total_observed()` counts every call to `record_sample` — one
+/// per `Drop` / `into_iter` / `cap_inspect_at`.
 ///
-/// `creation_count - samples.len()` is therefore an indicator of the number
-/// of in-flight or leaked instances at the time of inspection.
+/// Typical patterns:
+///
+/// | Binding kind              | `creation_count` | `total_observed`      |
+/// |---------------------------|------------------|-----------------------|
+/// | safe-only (wrap_from + Drop) | 1             | 1 (Drop sample)       |
+/// | mixed (wrap_from + N inspects + Drop) | 1    | N + 1                 |
+/// | t*_owned! (no Drop tracking) | 1             | 1 (initial sample)    |
+///
+/// `creation_count` can exceed `samples.total_observed()` when instances
+/// are in-flight (created but not yet dropped), leaked via
+/// `std::mem::forget`, or when Drop panics before `record_sample` is
+/// reached.  The difference is an indicator of outstanding live instances.
+///
+/// `samples.snapshot()` returns at most `CAPTRACK_SAMPLE_CAP` (default 4096)
+/// values — a statistically representative reservoir of all observed capacities.
 pub struct CapStats {
     pub name: &'static str, // fixed at first insert, never changed
     pub creation_count: AtomicU64,
-    /// One sample per Drop/into_iter call — raw capacities for post-processing.
-    /// Lock-free push via scc::Bag; order is not guaranteed (fine for max/percentile/sum).
-    pub samples: scc::Bag<usize>,
+    /// Bounded reservoir of capacity samples (Vitter Algorithm R).
+    /// Use `samples.record(cap)` to add, `samples.snapshot()` to read,
+    /// `samples.total_observed()` for the full count.
+    pub samples: Reservoir,
 }
 
 impl CapStats {
@@ -41,7 +74,7 @@ impl CapStats {
         Self {
             name,
             creation_count: AtomicU64::new(0),
-            samples: scc::Bag::new(),
+            samples: Reservoir::new(),
         }
     }
 }
@@ -94,9 +127,18 @@ pub fn record_initial(name: &'static str, file: &'static str, line: u32, column:
     record_sample(file, line, column, cap);
 }
 
-/// Record a capacity sample for the call-site. Called from every `Drop` impl
-/// and `IntoIterator::into_iter` impl.
-/// Lock-free: scc::Bag::push does not block or return an error.
+/// Record a capacity sample for the call-site.
+///
+/// Called from every `Drop` impl, `IntoIterator::into_iter` impl, and
+/// `CapInspect::cap_inspect_at` impl (Phase L injection).
+///
+/// If the call-site key is not in the registry (e.g. `cap_inspect_at` is
+/// called for a construction site that was never registered via
+/// `record_creation` / `record_initial`), the sample is silently discarded
+/// in release mode.  In debug mode a `debug_assert` fires to surface the
+/// orphan call.
+///
+/// Does **not** touch `creation_count`.
 pub fn record_sample(file: &'static str, line: u32, column: u32, cap: usize) {
     let entry = registry().get(&(file, line, column));
     debug_assert!(
@@ -104,6 +146,6 @@ pub fn record_sample(file: &'static str, line: u32, column: u32, cap: usize) {
         "record_sample called for unregistered location {file}:{line}:{column}"
     );
     if let Some(entry) = entry {
-        entry.samples.push(cap);
+        entry.samples.record(cap);
     }
 }
