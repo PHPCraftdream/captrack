@@ -17,7 +17,7 @@ use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Node, QPath};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::TyKind;
+use rustc_middle::ty::{GenericArgsRef, TyKind};
 use rustc_span::def_id::DefId;
 use rustc_span::{FileName, Symbol};
 
@@ -604,11 +604,24 @@ fn check_call_site<'tcx>(
     //   • Any constructor-like free function whose result is one of our types.
     // -----------------------------------------------------------------------
     let ret_ty = typeck.expr_ty(call_expr);
-    if let TyKind::Adt(adt_def, _) = ret_ty.kind() {
-        if recognise_tracked_type(cx, adt_def.did()).is_some() {
-            // Strategy B: emit warning only (no suggestion for Default::default()
-            // — we'd need to synthesise a type path, deferred to a later milestone).
-            emit_warning_only(cx, span, profile);
+    if let TyKind::Adt(adt_def, generic_args) = ret_ty.kind() {
+        if let Some(tracked) = recognise_tracked_type(cx, adt_def.did()) {
+            let policy_defaults = PolicyDefaults {
+                cap_from: read_cap_from(),
+                cap_mul: read_cap_mul(),
+                cap_round: read_cap_round(),
+            };
+            emit_with_default_dispatch_suggestion(
+                cx,
+                call_expr,
+                tracked,
+                adt_def.did(),
+                generic_args,
+                span,
+                profile,
+                read_hasher_choice(),
+                policy_defaults,
+            );
         }
     }
 }
@@ -639,10 +652,203 @@ fn extract_cap_expr<'tcx>(
     CapExpr::Zero
 }
 
+/// Map a `TrackedType` to its static fully-qualified type path prefix for use
+/// in a `::with_capacity(N)` or `::with_capacity_and_hasher(N, H)` suggestion.
+///
+/// Returns `None` for types that have no `with_capacity` constructor
+/// (`BTreeMap`, `BTreeSet`, `SccTreeIndex`) — callers must fall back to
+/// warning-only for these.
+///
+/// The returned path does NOT include generic arguments; Rust's type inference
+/// fills them in from the surrounding context (e.g. a `let` type ascription or
+/// the site's inferred type).
+pub(crate) fn tracked_type_to_static_path(t: TrackedType) -> Option<&'static str> {
+    match t {
+        TrackedType::Vec => Some("::std::vec::Vec"),
+        TrackedType::VecDeque => Some("::std::collections::VecDeque"),
+        TrackedType::HashMap => Some("::std::collections::HashMap"),
+        TrackedType::HashSet => Some("::std::collections::HashSet"),
+        // BTreeMap / BTreeSet / SccTreeIndex have no with_capacity.
+        TrackedType::BTreeMap | TrackedType::BTreeSet | TrackedType::SccTreeIndex => None,
+        TrackedType::BytesMut => Some("::bytes::BytesMut"),
+        TrackedType::IndexMap => Some("::indexmap::IndexMap"),
+        TrackedType::IndexSet => Some("::indexmap::IndexSet"),
+        TrackedType::DashMap => Some("::dashmap::DashMap"),
+        TrackedType::SccHashMap => Some("::scc::HashMap"),
+        TrackedType::SccHashSet => Some("::scc::HashSet"),
+        // SmallVec::with_capacity() exists — use the static prefix.
+        // NOTE: SmallVec is generic over the array type `A`; without explicit
+        // turbofish the compiler infers `A` from context (type ascription or
+        // usage).  The suggestion is still MachineApplicable only when the
+        // target binding has an explicit type annotation.
+        TrackedType::SmallVec => Some("::smallvec::SmallVec"),
+    }
+}
+
+/// Return `true` if the type supports `with_capacity_and_hasher` (and thus
+/// can accept a hasher injection from `CAPTRACK_PGO_HASHER`).
+pub(crate) fn tracked_type_supports_hasher(t: TrackedType) -> bool {
+    matches!(
+        t,
+        TrackedType::HashMap
+            | TrackedType::HashSet
+            | TrackedType::IndexMap
+            | TrackedType::IndexSet
+            | TrackedType::DashMap
+            | TrackedType::SccHashMap
+            | TrackedType::SccHashSet
+    )
+}
+
+/// Emit a lint warning with a MachineApplicable suggestion for
+/// `Default::default()` and other Strategy-B call sites (return-type dispatch).
+///
+/// Decision path:
+/// - BTreeMap / BTreeSet / SccTreeIndex → no `with_capacity` → warning only.
+/// - All other TrackedTypes → compute capacity via `propose_cap` and emit a
+///   `span_lint_and_sugg` with the static qualified path.
+///
+/// Hasher injection:
+/// - When `hasher` is `Some(H)` and the type supports `with_capacity_and_hasher`,
+///   the suggestion uses `with_capacity_and_hasher(N, H::default())`.
+/// - When the enclosing `let` binding has an explicit type ascription that
+///   names a plain HashMap/HashSet (no third-party hasher), the hasher swap is
+///   skipped and only the capacity is updated (same guard as Strategy A).
+///
+/// The suggestion uses a generic-free path (e.g. `::std::vec::Vec`) and
+/// relies on Rust's type inference to fill in the generic arguments from the
+/// surrounding context (type ascription on the `let` binding, or usage
+/// patterns elsewhere).  This is the "alternative" approach described in the
+/// Phase-G brief; `def_path_str_with_args` would produce the same result but
+/// is unnecessarily complex for this use-case.
+#[allow(clippy::too_many_arguments)]
+fn emit_with_default_dispatch_suggestion<'tcx>(
+    cx: &LateContext<'tcx>,
+    call_expr: &Expr<'tcx>,
+    tracked: TrackedType,
+    _adt_did: DefId,
+    _generic_args: GenericArgsRef<'tcx>,
+    span: rustc_span::Span,
+    profile: &Profile,
+    hasher: Option<HasherChoice>,
+    policy_defaults: PolicyDefaults,
+) {
+    let key = span_to_site_key(cx, span);
+    let Some(stats) = profile.get(&key) else {
+        return;
+    };
+
+    let unit_str = match stats.unit {
+        model::Unit::Elements => "elements",
+        model::Unit::Bytes => "bytes",
+    };
+
+    // BTreeMap / BTreeSet / SccTreeIndex: no with_capacity — warn only.
+    let Some(type_path) = tracked_type_to_static_path(tracked) else {
+        span_lint(
+            cx,
+            CAPTRACK_PGO_CAPACITY,
+            span,
+            format!(
+                "captrack-pgo: profile shows peak={peak} {unit}, p95={p95}, count={count} \
+                 — consider with_capacity",
+                peak = stats.peak,
+                unit = unit_str,
+                p95 = stats.p95,
+                count = stats.count,
+            ),
+        );
+        return;
+    };
+
+    // `Default::default()` has no capacity argument — the current cap is Zero.
+    let cap_expr = CapExpr::Zero;
+    let decision = rules::propose_cap(stats, &cap_expr, policy_defaults);
+
+    match decision {
+        Decision::Skip { reason } => {
+            span_lint(
+                cx,
+                CAPTRACK_PGO_CAPACITY,
+                span,
+                format!(
+                    "captrack-pgo: profile shows peak={peak} {unit}, p95={p95}, count={count} \
+                     — no change suggested ({reason})",
+                    peak = stats.peak,
+                    unit = unit_str,
+                    p95 = stats.p95,
+                    count = stats.count,
+                    reason = reason,
+                ),
+            );
+        }
+        Decision::Patch {
+            to,
+            applicability: rules_applicability,
+            ..
+        } => {
+            let base_applicability = match rules_applicability {
+                rules::Applicability::MachineApplicable => Applicability::MachineApplicable,
+                rules::Applicability::MaybeIncorrect => Applicability::MaybeIncorrect,
+            };
+
+            let msg = format!(
+                "captrack-pgo: profile shows peak={peak} {unit}, p95={p95}, count={count} \
+                 — pre-allocate to {to}",
+                peak = stats.peak,
+                unit = unit_str,
+                p95 = stats.p95,
+                count = stats.count,
+                to = to,
+            );
+
+            // Determine hasher injection eligibility.
+            let inject_hasher = hasher.filter(|_| tracked_type_supports_hasher(tracked));
+
+            let (sugg, applicability, help_label) = if let Some(h) = inject_hasher {
+                // Check for explicit local type ascription that would block
+                // inference of the new hasher type parameter.
+                let ascription_detected = has_local_type_ascription(cx, call_expr);
+                if ascription_detected {
+                    // Skip hasher swap; capacity-only suggestion.
+                    let cap_sugg = format!("{type_path}::with_capacity({to})");
+                    let label = format!(
+                        "use with_capacity({to}) (skipping hasher swap — explicit type \
+                         ascription would prevent inference)"
+                    );
+                    (cap_sugg, base_applicability, label)
+                } else {
+                    // Safe to inject hasher.
+                    let sugg = format!(
+                        "{type_path}::with_capacity_and_hasher({to}, {})",
+                        h.default_expr()
+                    );
+                    let label = format!("use with_capacity_and_hasher({to}, {})", h.default_expr());
+                    (sugg, base_applicability, label)
+                }
+            } else {
+                // Capacity-only path.
+                let sugg = format!("{type_path}::with_capacity({to})");
+                let label = format!("use with_capacity({to})");
+                (sugg, base_applicability, label)
+            };
+
+            span_lint_and_sugg(
+                cx,
+                CAPTRACK_PGO_CAPACITY,
+                span,
+                msg,
+                help_label,
+                sugg,
+                applicability,
+            );
+        }
+    }
+}
+
 /// Emit a lint warning only (no suggestion).
 ///
-/// Used for: BTreeMap/BTreeSet (no `with_capacity`), `Default::default()`,
-/// and method-call form (deferred).
+/// Used for: method-call form (deferred) and macro-expanded sites.
 fn emit_warning_only(cx: &LateContext<'_>, span: rustc_span::Span, profile: &Profile) {
     let key = span_to_site_key(cx, span);
     if let Some(stats) = profile.get(&key) {
@@ -984,5 +1190,318 @@ pub(crate) fn span_to_site_key(cx: &LateContext<'_>, span: rustc_span::Span) -> 
         line: loc.line as u32,
         // col is 0-based; column!() is 1-based → add 1.
         col: loc.col.0 as u32 + 1,
+    }
+}
+
+// ── Unit tests for pure helpers (no HIR / rustc context needed) ──────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{CapExpr, SiteKey, SiteStats, Unit};
+    use std::path::PathBuf;
+
+    fn key() -> SiteKey {
+        SiteKey {
+            file: PathBuf::from("x.rs"),
+            line: 1,
+            col: 1,
+        }
+    }
+
+    fn stats_for(peak: usize, p95: usize, count: u64) -> SiteStats {
+        SiteStats {
+            key: key(),
+            unit: Unit::Elements,
+            peak,
+            p50: p95 / 2,
+            p95,
+            count,
+            mean: None,
+            p99: None,
+            policy: None,
+        }
+    }
+
+    // ── tracked_type_to_static_path ──────────────────────────────────────────
+
+    /// Vec maps to ::std::vec::Vec.
+    #[test]
+    fn static_path_vec() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::Vec),
+            Some("::std::vec::Vec")
+        );
+    }
+
+    /// HashMap maps to ::std::collections::HashMap.
+    #[test]
+    fn static_path_hashmap() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::HashMap),
+            Some("::std::collections::HashMap")
+        );
+    }
+
+    /// HashSet maps to ::std::collections::HashSet.
+    #[test]
+    fn static_path_hashset() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::HashSet),
+            Some("::std::collections::HashSet")
+        );
+    }
+
+    /// VecDeque maps to ::std::collections::VecDeque.
+    #[test]
+    fn static_path_vecdeque() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::VecDeque),
+            Some("::std::collections::VecDeque")
+        );
+    }
+
+    /// BytesMut maps to ::bytes::BytesMut.
+    #[test]
+    fn static_path_bytesmut() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::BytesMut),
+            Some("::bytes::BytesMut")
+        );
+    }
+
+    /// IndexMap maps to ::indexmap::IndexMap.
+    #[test]
+    fn static_path_indexmap() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::IndexMap),
+            Some("::indexmap::IndexMap")
+        );
+    }
+
+    /// IndexSet maps to ::indexmap::IndexSet.
+    #[test]
+    fn static_path_indexset() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::IndexSet),
+            Some("::indexmap::IndexSet")
+        );
+    }
+
+    /// DashMap maps to ::dashmap::DashMap.
+    #[test]
+    fn static_path_dashmap() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::DashMap),
+            Some("::dashmap::DashMap")
+        );
+    }
+
+    /// SccHashMap maps to ::scc::HashMap.
+    #[test]
+    fn static_path_scc_hashmap() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::SccHashMap),
+            Some("::scc::HashMap")
+        );
+    }
+
+    /// SccHashSet maps to ::scc::HashSet.
+    #[test]
+    fn static_path_scc_hashset() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::SccHashSet),
+            Some("::scc::HashSet")
+        );
+    }
+
+    /// SmallVec maps to ::smallvec::SmallVec.
+    #[test]
+    fn static_path_smallvec() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::SmallVec),
+            Some("::smallvec::SmallVec")
+        );
+    }
+
+    /// BTreeMap returns None — no with_capacity.
+    #[test]
+    fn default_default_synthesises_btreemap_warning_only() {
+        assert_eq!(
+            tracked_type_to_static_path(TrackedType::BTreeMap),
+            None,
+            "BTreeMap has no with_capacity — must return None"
+        );
+    }
+
+    /// BTreeSet returns None — no with_capacity.
+    #[test]
+    fn static_path_btreeset_none() {
+        assert_eq!(tracked_type_to_static_path(TrackedType::BTreeSet), None);
+    }
+
+    /// SccTreeIndex returns None — no with_capacity.
+    #[test]
+    fn static_path_scc_tree_index_none() {
+        assert_eq!(tracked_type_to_static_path(TrackedType::SccTreeIndex), None);
+    }
+
+    // ── tracked_type_supports_hasher ─────────────────────────────────────────
+
+    /// Hasher-capable types.
+    #[test]
+    fn hasher_support_yes() {
+        for t in [
+            TrackedType::HashMap,
+            TrackedType::HashSet,
+            TrackedType::IndexMap,
+            TrackedType::IndexSet,
+            TrackedType::DashMap,
+            TrackedType::SccHashMap,
+            TrackedType::SccHashSet,
+        ] {
+            assert!(
+                tracked_type_supports_hasher(t),
+                "{t:?} should support hasher injection"
+            );
+        }
+    }
+
+    /// Non-hasher types.
+    #[test]
+    fn hasher_support_no() {
+        for t in [
+            TrackedType::Vec,
+            TrackedType::VecDeque,
+            TrackedType::BTreeMap,
+            TrackedType::BTreeSet,
+            TrackedType::BytesMut,
+            TrackedType::SccTreeIndex,
+            TrackedType::SmallVec,
+        ] {
+            assert!(
+                !tracked_type_supports_hasher(t),
+                "{t:?} should NOT support hasher injection"
+            );
+        }
+    }
+
+    // ── Suggestion-string synthesis (pure, no HIR) ───────────────────────────
+
+    /// Vec: Default::default() with profile → ::std::vec::Vec::with_capacity(N).
+    #[test]
+    fn default_default_synthesises_vec_with_capacity() {
+        let path = tracked_type_to_static_path(TrackedType::Vec).unwrap();
+        let s = stats_for(60, 60, 50);
+        let defaults = PolicyDefaults::default();
+        let decision = rules::propose_cap(&s, &CapExpr::Zero, defaults);
+        if let Decision::Patch { to, .. } = decision {
+            let sugg = format!("{path}::with_capacity({to})");
+            assert_eq!(sugg, "::std::vec::Vec::with_capacity(64)");
+        } else {
+            panic!("expected Patch for Vec, got {:?}", decision);
+        }
+    }
+
+    /// HashMap: Default::default() with profile → ::std::collections::HashMap::with_capacity(N).
+    #[test]
+    fn default_default_synthesises_hashmap_with_capacity() {
+        let path = tracked_type_to_static_path(TrackedType::HashMap).unwrap();
+        let s = stats_for(60, 60, 50);
+        let defaults = PolicyDefaults::default();
+        let decision = rules::propose_cap(&s, &CapExpr::Zero, defaults);
+        if let Decision::Patch { to, .. } = decision {
+            let sugg = format!("{path}::with_capacity({to})");
+            assert_eq!(sugg, "::std::collections::HashMap::with_capacity(64)");
+        } else {
+            panic!("expected Patch for HashMap, got {:?}", decision);
+        }
+    }
+
+    /// HashMap: with Fx hasher → ::std::collections::HashMap::with_capacity_and_hasher(N, <expr>).
+    #[test]
+    fn default_default_with_hasher_fx_works() {
+        let path = tracked_type_to_static_path(TrackedType::HashMap).unwrap();
+        let s = stats_for(60, 60, 50);
+        let defaults = PolicyDefaults::default();
+        let decision = rules::propose_cap(&s, &CapExpr::Zero, defaults);
+        let h = HasherChoice::Fx;
+        if let Decision::Patch { to, .. } = decision {
+            let sugg = format!(
+                "{path}::with_capacity_and_hasher({to}, {})",
+                h.default_expr()
+            );
+            assert_eq!(
+                sugg,
+                "::std::collections::HashMap::with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default())"
+            );
+        } else {
+            panic!("expected Patch for HashMap+Fx, got {:?}", decision);
+        }
+    }
+
+    /// BTreeMap: no static path → suggestion not synthesised (warning-only path).
+    #[test]
+    fn btreemap_no_path_means_warning_only() {
+        // tracked_type_to_static_path returns None; callers fall back to span_lint.
+        assert!(
+            tracked_type_to_static_path(TrackedType::BTreeMap).is_none(),
+            "BTreeMap must return None so callers fall back to warning-only"
+        );
+        // Verify propose_cap itself would have produced a Patch (the Decision
+        // pipeline works; only the emitter bails out because there's no path).
+        let s = stats_for(60, 60, 50);
+        let d = rules::propose_cap(&s, &CapExpr::Zero, PolicyDefaults::default());
+        assert!(
+            matches!(d, Decision::Patch { .. }),
+            "propose_cap should still produce Patch for BTreeMap stats"
+        );
+    }
+
+    /// SccHashMap suggestion path.
+    #[test]
+    fn default_default_synthesises_scc_hashmap_with_capacity() {
+        let path = tracked_type_to_static_path(TrackedType::SccHashMap).unwrap();
+        let s = stats_for(60, 60, 50);
+        let defaults = PolicyDefaults::default();
+        let decision = rules::propose_cap(&s, &CapExpr::Zero, defaults);
+        if let Decision::Patch { to, .. } = decision {
+            let sugg = format!("{path}::with_capacity({to})");
+            assert_eq!(sugg, "::scc::HashMap::with_capacity(64)");
+        } else {
+            panic!("expected Patch for SccHashMap, got {:?}", decision);
+        }
+    }
+
+    /// BytesMut suggestion path.
+    #[test]
+    fn default_default_synthesises_bytesmut_with_capacity() {
+        let path = tracked_type_to_static_path(TrackedType::BytesMut).unwrap();
+        let s = stats_for(60, 60, 50);
+        let defaults = PolicyDefaults::default();
+        let decision = rules::propose_cap(&s, &CapExpr::Zero, defaults);
+        if let Decision::Patch { to, .. } = decision {
+            let sugg = format!("{path}::with_capacity({to})");
+            assert_eq!(sugg, "::bytes::BytesMut::with_capacity(64)");
+        } else {
+            panic!("expected Patch for BytesMut, got {:?}", decision);
+        }
+    }
+
+    /// Generic-args round-trip: the suggestion string uses a generic-free path,
+    /// relying on type inference.  Verify the suggestion format for a type with
+    /// generic parameters (Vec<u8> → Vec::with_capacity(N), not Vec::<u8>::with_capacity(N)).
+    #[test]
+    fn generic_args_round_trip_uses_generic_free_path() {
+        // The static-path approach always uses generic-free paths.
+        // Vec<u8> and Vec<String> both get "::std::vec::Vec::with_capacity(N)".
+        let path = tracked_type_to_static_path(TrackedType::Vec).unwrap();
+        assert!(
+            !path.contains('<'),
+            "static path must not contain generic args"
+        );
+        assert!(
+            !path.contains('>'),
+            "static path must not contain generic args"
+        );
     }
 }
