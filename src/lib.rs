@@ -85,6 +85,8 @@
 
 pub mod hasher;
 
+pub mod cap_inspect;
+
 #[cfg(feature = "telemetry")]
 pub mod registry;
 
@@ -115,6 +117,7 @@ pub mod ctor;
 // Public re-exports
 // ---------------------------------------------------------------------------
 
+pub use cap_inspect::CapInspect;
 pub use captrack_macros::declare_collections;
 pub use dump::dump_capacity_stats;
 pub use hasher::CapHasher;

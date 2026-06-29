@@ -4,6 +4,7 @@
 // (integration tests) because the generated macros call `::captrack::t*!`
 // with absolute paths that only resolve from outside the crate.
 
+pub mod cap_inspect_tests;
 pub mod off_feature_tests;
 pub mod per_call_override_tests;
 
