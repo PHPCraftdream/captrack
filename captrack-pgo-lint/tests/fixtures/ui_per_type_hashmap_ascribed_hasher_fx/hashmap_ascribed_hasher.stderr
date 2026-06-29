@@ -1,0 +1,15 @@
+warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
+  --> $DIR/hashmap_ascribed_hasher.rs:14:32
+   |
+LL |     let m: HashMap<u32, u32> = HashMap::<u32, u32>::with_capacity(0);
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(captrack_pgo_capacity)]` on by default
+help: use with_capacity_and_hasher + extend type ascription with hasher (Phase N)
+   |
+LL -     let m: HashMap<u32, u32> = HashMap::<u32, u32>::with_capacity(0);
+LL +     let m: HashMap<u32, u32, ::fxhash::FxBuildHasher> = HashMap::<u32, u32>::with_capacity_and_hasher(64, ::fxhash::FxBuildHasher::default());
+   |
+
+warning: 1 warning emitted
+

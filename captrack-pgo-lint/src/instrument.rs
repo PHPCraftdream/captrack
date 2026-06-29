@@ -936,9 +936,7 @@ impl<'tcx> Visitor<'tcx> for UnsafeUsageCollector<'_, 'tcx> {
                             // `cap_inspect_at` call, the injection has already
                             // been applied — skip to avoid doubling up.
                             if !is_already_cap_inspect_wrapped(self.cx, expr) {
-                                self.unsafe_usages.push(UnsafeUsage {
-                                    span: expr.span,
-                                });
+                                self.unsafe_usages.push(UnsafeUsage { span: expr.span });
                             }
                         }
                     }
@@ -965,10 +963,7 @@ impl<'tcx> Visitor<'tcx> for UnsafeUsageCollector<'_, 'tcx> {
 /// This check is conservative — it uses snippet text matching to avoid
 /// depending on HIR structure of the generated code, which may not be
 /// directly observable in the same lint pass.
-fn is_already_cap_inspect_wrapped<'tcx>(
-    cx: &LateContext<'tcx>,
-    usage_expr: &Expr<'tcx>,
-) -> bool {
+fn is_already_cap_inspect_wrapped<'tcx>(cx: &LateContext<'tcx>, usage_expr: &Expr<'tcx>) -> bool {
     // Walk up ONE level.
     let mut parents = cx.tcx.hir_parent_id_iter(usage_expr.hir_id);
     let Some(parent_id) = parents.next() else {
@@ -1009,10 +1004,7 @@ fn is_already_cap_inspect_wrapped<'tcx>(
 /// semantics because the borrow is dropped before `v` is moved out of the
 /// block by the trailing expression.  The type of the block is the same as
 /// the type of `v` — no type change, no E0308.
-pub(crate) fn build_cap_inspect_suggestion(
-    binding_snippet: &str,
-    auto_label: &str,
-) -> String {
+pub(crate) fn build_cap_inspect_suggestion(binding_snippet: &str, auto_label: &str) -> String {
     format!(
         r#"{{ ::captrack::CapInspect::cap_inspect_at(&{binding_snippet}, "{auto_label}", file!(), line!(), column!()); {binding_snippet} }}"#,
     )
@@ -1814,7 +1806,10 @@ mod tests {
         let win_path = PathBuf::from(r"crates\shamir-server\src\lib.rs");
         let label = build_auto_label(&win_path, 42, 7);
         // Verify label has no backslashes.
-        assert!(!label.contains('\\'), "label must not retain backslashes: {label:?}");
+        assert!(
+            !label.contains('\\'),
+            "label must not retain backslashes: {label:?}"
+        );
         // Build suggestion with normalised label.
         let sugg = build_cap_inspect_suggestion("v", &label);
         assert!(

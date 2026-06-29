@@ -10,12 +10,12 @@ extern crate rustc_span;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::source::snippet_opt;
 use clippy_utils::sym;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
-use rustc_hir::{Expr, ExprKind, Node, QPath};
+use rustc_hir::{Expr, ExprKind, Node, QPath, TyKind as HirTyKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{GenericArgsRef, TyKind};
 use rustc_span::def_id::DefId;
@@ -86,15 +86,23 @@ rustc_session::declare_lint! {
     /// - `ahash`    → `::ahash::RandomState::new()`
     /// - `foldhash` → `::foldhash::fast::RandomState::default()`
     ///
-    /// ### Hasher-injection limitations (M9)
+    /// ### Hasher-injection and type ascriptions (Phase N)
     ///
-    /// When `CAPTRACK_PGO_HASHER` is set, the lint detects explicit type
-    /// ascriptions on `let` bindings (`let m: HashMap<K, V> = ...`) and
-    /// **skips** the hasher injection for those sites (only the capacity is
-    /// updated).  Sites in struct fields, function return types, or `const`/
-    /// `static` items with explicit types are **not** detected and may produce
-    /// compile errors if the suggestion is accepted.  Remember to add the
-    /// chosen hasher crate to your `Cargo.toml`.
+    /// When `CAPTRACK_PGO_HASHER` is set, the lint handles explicit type
+    /// ascriptions on `let` bindings intelligently:
+    ///
+    /// - `let m: HashMap<K, V> = HashMap::new()` — hasher omitted in ascription
+    ///   → **multi-span suggestion**: extends the ascription to
+    ///   `HashMap<K, V, FxBuildHasher>` and rewrites the ctor simultaneously.
+    /// - `let m: HashMap<K, V, MyHasher> = HashMap::new()` — hasher pinned
+    ///   → capacity-only rewrite (user's hasher is preserved).
+    /// - `let m: HashMap = HashMap::new()` — no generics written
+    ///   → capacity-only rewrite (insufficient information to safely add hasher).
+    ///
+    /// Sites in struct fields, function return types, or `const`/`static` items
+    /// with explicit types are **not** detected and may produce compile errors if
+    /// the suggestion is accepted.  Remember to add the chosen hasher crate to
+    /// your `Cargo.toml`.
     ///
     /// ### Why is this bad?
     ///
@@ -297,6 +305,19 @@ impl HasherChoice {
             HasherChoice::FoldHash => "::foldhash::fast::RandomState::default()",
         }
     }
+
+    /// Fully-qualified type path for use as a generic type argument in an
+    /// ascription, e.g. `HashMap<K, V, ::fxhash::FxBuildHasher>`.
+    ///
+    /// Note: this is the *type* (not the value constructor) — it must be a
+    /// valid type expression in angle brackets.
+    pub(crate) fn hasher_type_path(self) -> &'static str {
+        match self {
+            HasherChoice::Fx => "::fxhash::FxBuildHasher",
+            HasherChoice::AHash => "::ahash::RandomState",
+            HasherChoice::FoldHash => "::foldhash::fast::RandomState",
+        }
+    }
 }
 
 /// Read `CAPTRACK_PGO_HASHER` once and cache the result.
@@ -418,6 +439,107 @@ pub(crate) fn read_cap_round() -> CapRound {
     })
 }
 
+/// How the type ascription in a `let` binding specifies (or omits) the hasher
+/// parameter for a hash-keyed collection.
+///
+/// Used by `classify_type_ascription_hir` to decide whether Phase N can emit a
+/// multi-span rewrite that extends the ascription with a hasher type argument.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum AscriptionForm {
+    /// `HashMap<K, V>` — hasher omitted (defaults to `RandomState`).  We CAN
+    /// rewrite to `HashMap<K, V, ::fxhash::FxBuildHasher>` safely.
+    HasherOmitted,
+    /// `HashMap<K, V, MyHasher>` — hasher pinned by the user.  Skip swap.
+    HasherPinned,
+    /// `HashMap` (no generics written at all) — not enough information to
+    /// safely insert a hasher.  Skip.
+    Wildcard,
+    /// Not a hashing type (Vec, BytesMut, …) or unrecognised generic count.
+    NotApplicable,
+}
+
+/// How many generic args a hashing collection requires when the hasher is
+/// omitted vs when it is specified (by-value comparison, not HIR inspection).
+///
+/// Returns `(args_without_hasher, args_with_hasher)` for the given
+/// `TrackedType`, or `None` for non-hashing types.
+pub(crate) fn hasher_arg_counts(t: TrackedType) -> Option<(usize, usize)> {
+    match t {
+        // HashMap<K, V>     — 2 without hasher, 3 with hasher
+        TrackedType::HashMap => Some((2, 3)),
+        // HashSet<T>        — 1 without hasher, 2 with hasher
+        TrackedType::HashSet => Some((1, 2)),
+        // IndexMap<K, V, S> — 2 without hasher, 3 with hasher
+        TrackedType::IndexMap => Some((2, 3)),
+        // IndexSet<T, S>    — 1 without hasher, 2 with hasher
+        TrackedType::IndexSet => Some((1, 2)),
+        // DashMap<K, V, S>  — 2 without hasher, 3 with hasher
+        TrackedType::DashMap => Some((2, 3)),
+        // scc::HashMap<K, V, S> — 2 without hasher, 3 with hasher
+        TrackedType::SccHashMap => Some((2, 3)),
+        // scc::HashSet<T, S>    — 1 without hasher, 2 with hasher
+        TrackedType::SccHashSet => Some((1, 2)),
+        _ => None,
+    }
+}
+
+/// Inspect the HIR type node from a `let` binding's explicit annotation and
+/// classify whether the hasher parameter is omitted, pinned, or absent.
+///
+/// Called only when the `let` has an explicit type (`local.ty.is_some()`).
+///
+/// The function walks the type's HIR structure to find the last path segment
+/// and counts how many generic args are written:
+///
+/// - 0 written args   → `Wildcard` (e.g. `let m: HashMap = …`)
+/// - args_without == N → `HasherOmitted` (e.g. `HashMap<K, V>` for HashMap)
+/// - args_with    == N → `HasherPinned`  (e.g. `HashMap<K, V, S>` for HashMap)
+/// - anything else    → `NotApplicable`
+pub(crate) fn classify_type_ascription_hir<'tcx>(
+    hir_ty: &rustc_hir::Ty<'tcx>,
+    tracked: TrackedType,
+) -> AscriptionForm {
+    let Some((without_hasher, with_hasher)) = hasher_arg_counts(tracked) else {
+        return AscriptionForm::NotApplicable;
+    };
+
+    // The type must be a path type (TyKind::Path).
+    let HirTyKind::Path(qpath) = &hir_ty.kind else {
+        return AscriptionForm::NotApplicable;
+    };
+
+    // Extract the last path segment to get the generic args.
+    let last_segment = match qpath {
+        QPath::Resolved(_, path) => path.segments.last(),
+        QPath::TypeRelative(_, segment) => Some(*segment),
+    };
+
+    let Some(segment) = last_segment else {
+        return AscriptionForm::NotApplicable;
+    };
+
+    // Count the written generic args (skip lifetime args — they don't count
+    // toward the K/V/S hasher parameter position).
+    let n_args = match segment.args {
+        None => 0,
+        Some(generic_args) => generic_args
+            .args
+            .iter()
+            .filter(|a| !matches!(a, rustc_hir::GenericArg::Lifetime(_)))
+            .count(),
+    };
+
+    if n_args == 0 {
+        AscriptionForm::Wildcard
+    } else if n_args == without_hasher {
+        AscriptionForm::HasherOmitted
+    } else if n_args == with_hasher {
+        AscriptionForm::HasherPinned
+    } else {
+        AscriptionForm::NotApplicable
+    }
+}
+
 /// Determine whether the enclosing `let` binding has an explicit type
 /// ascription that resolves to `HashMap` or `HashSet`.
 ///
@@ -465,6 +587,29 @@ fn has_local_type_ascription<'tcx>(cx: &LateContext<'tcx>, call_expr: &Expr<'tcx
         }
     } else {
         false
+    }
+}
+
+/// Retrieve the HIR type from the enclosing `let` binding's type annotation,
+/// together with the ascription type node itself.
+///
+/// Returns `Some((&Ty, AscriptionForm))` when:
+/// - The immediate parent of `call_expr` is a `LetStmt` with an explicit type.
+/// - The `AscriptionForm` is determined by `classify_type_ascription_hir`.
+///
+/// Returns `None` when there is no enclosing `let`, or no explicit type.
+fn get_let_ascription<'tcx>(
+    cx: &LateContext<'tcx>,
+    call_expr: &Expr<'tcx>,
+    tracked: TrackedType,
+) -> Option<(&'tcx rustc_hir::Ty<'tcx>, AscriptionForm)> {
+    let parent_id = cx.tcx.hir_parent_id_iter(call_expr.hir_id).next()?;
+    if let Node::LetStmt(local) = cx.tcx.hir_node(parent_id) {
+        let ty = local.ty?;
+        let form = classify_type_ascription_hir(ty, tracked);
+        Some((ty, form))
+    } else {
+        None
     }
 }
 
@@ -580,6 +725,7 @@ fn check_call_site<'tcx>(
                         call_expr,
                         fn_expr,
                         ctor,
+                        tracked_ty,
                         method_name,
                         args,
                         &cap_expr,
@@ -877,12 +1023,22 @@ fn emit_warning_only(cx: &LateContext<'_>, span: rustc_span::Span, profile: &Pro
 /// For `BTreeMap`/`BTreeSet` — no `with_capacity` exists — falls back to
 /// `emit_warning_only`.  For `Default::default()` the caller should use
 /// `emit_warning_only` directly.
+///
+/// Phase N: when `hasher` is `Some(H)` and the enclosing `let` has a type
+/// ascription with the hasher **omitted** (e.g. `let m: HashMap<K, V> = …`),
+/// emits a **multi-span** suggestion that simultaneously:
+/// - Extends the ascription: `HashMap<K, V>` → `HashMap<K, V, ::fxhash::FxBuildHasher>`
+/// - Rewrites the ctor: `HashMap::new()` → `HashMap::with_capacity_and_hasher(N, …)`
+///
+/// When the ascription already pins the hasher (`HasherPinned`) or has no
+/// generics at all (`Wildcard`), falls back to the capacity-only rewrite.
 #[allow(clippy::too_many_arguments)]
 fn emit_with_suggestion<'tcx>(
     cx: &LateContext<'tcx>,
     call_expr: &Expr<'tcx>,
     fn_expr: &Expr<'tcx>,
     ctor: Ctor,
+    tracked_ty: TrackedType,
     method_name: Symbol,
     args: &'tcx [Expr<'tcx>],
     cap_expr: &CapExpr,
@@ -978,39 +1134,133 @@ fn emit_with_suggestion<'tcx>(
                 to = to,
             );
 
-            // Build the suggestion string (handles both capacity-only and
-            // capacity+hasher paths).
-            let (sugg, applicability, help_label) = if let Some(h) = inject_hasher {
-                // Check for explicit local type ascription that would block
-                // inference of the new hasher type parameter.
-                let ascription_detected = has_local_type_ascription(cx, call_expr);
-                if ascription_detected {
-                    // Skip hasher swap; fall through to capacity-only path.
-                    // Emit a note about the skip in the suggestion label.
-                    let Some(cap_sugg) = build_suggestion(cx, fn_expr, method_name, args, to, None)
-                    else {
-                        span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
-                        return;
-                    };
-                    let label = format!(
-                        "use with_capacity({to}) (skipping hasher swap — explicit type \
-                             ascription would prevent inference)"
-                    );
-                    (cap_sugg, base_applicability, label)
-                } else {
-                    // Safe to inject hasher.
-                    let sugg_opt = build_suggestion(cx, fn_expr, method_name, args, to, Some(h));
-                    let applicability = match sugg_opt {
-                        None => {
-                            span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+            if let Some(h) = inject_hasher {
+                // Check for explicit local type ascription.
+                if let Some((hir_ty, form)) = get_let_ascription(cx, call_expr, tracked_ty) {
+                    match form {
+                        AscriptionForm::HasherOmitted => {
+                            // Phase N: multi-span suggestion — extend ascription AND
+                            // rewrite ctor simultaneously.
+                            //
+                            // Span A: the generic-args clause in the ascription.
+                            // Span B: the ctor call expression.
+                            if let Some(ctor_sugg) =
+                                build_suggestion(cx, fn_expr, method_name, args, to, Some(h))
+                            {
+                                if let Some(new_ty_snip) =
+                                    build_ascription_with_hasher(cx, hir_ty, h)
+                                {
+                                    // The ascription span covers the whole type node
+                                    // (e.g. `HashMap<K, V>`).  We replace the full type
+                                    // text with the new type including the hasher param.
+                                    let asc_span = hir_ty.span;
+                                    let label = format!(
+                                        "use with_capacity_and_hasher + extend type ascription \
+                                         with hasher (Phase N)"
+                                    );
+                                    span_lint_and_then(
+                                        cx,
+                                        CAPTRACK_PGO_CAPACITY,
+                                        span,
+                                        msg,
+                                        |diag| {
+                                            diag.multipart_suggestion(
+                                                label,
+                                                vec![(asc_span, new_ty_snip), (span, ctor_sugg)],
+                                                base_applicability,
+                                            );
+                                        },
+                                    );
+                                    return;
+                                }
+                            }
+                            // Fallback: snippet unavailable — capacity-only.
+                            let Some(cap_sugg) =
+                                build_suggestion(cx, fn_expr, method_name, args, to, None)
+                            else {
+                                span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                                return;
+                            };
+                            span_lint_and_sugg(
+                                cx,
+                                CAPTRACK_PGO_CAPACITY,
+                                span,
+                                msg,
+                                format!(
+                                    "use with_capacity({to}) (ascription snippet unavailable \
+                                     — hasher skipped)"
+                                ),
+                                cap_sugg,
+                                base_applicability,
+                            );
                             return;
                         }
-                        Some(_) => base_applicability,
-                    };
-                    let sugg = sugg_opt.unwrap();
-                    let label = format!("use with_capacity_and_hasher({to}, {})", h.default_expr());
-                    (sugg, applicability, label)
+                        AscriptionForm::HasherPinned => {
+                            // User explicitly pinned a hasher — respect that, capacity only.
+                            let Some(cap_sugg) =
+                                build_suggestion(cx, fn_expr, method_name, args, to, None)
+                            else {
+                                span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                                return;
+                            };
+                            span_lint_and_sugg(
+                                cx,
+                                CAPTRACK_PGO_CAPACITY,
+                                span,
+                                msg,
+                                format!(
+                                    "use with_capacity({to}) (skipping hasher swap — user \
+                                     pinned hasher in type ascription)"
+                                ),
+                                cap_sugg,
+                                base_applicability,
+                            );
+                            return;
+                        }
+                        AscriptionForm::Wildcard | AscriptionForm::NotApplicable => {
+                            // No generics written or unrecognised pattern — capacity only.
+                            let Some(cap_sugg) =
+                                build_suggestion(cx, fn_expr, method_name, args, to, None)
+                            else {
+                                span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                                return;
+                            };
+                            span_lint_and_sugg(
+                                cx,
+                                CAPTRACK_PGO_CAPACITY,
+                                span,
+                                msg,
+                                format!(
+                                    "use with_capacity({to}) (skipping hasher swap — explicit \
+                                     type ascription would prevent inference)"
+                                ),
+                                cap_sugg,
+                                base_applicability,
+                            );
+                            return;
+                        }
+                    }
                 }
+
+                // No local type ascription — inject hasher normally (existing M9 path).
+                let sugg_opt = build_suggestion(cx, fn_expr, method_name, args, to, Some(h));
+                let (sugg, applicability) = match sugg_opt {
+                    None => {
+                        span_lint(cx, CAPTRACK_PGO_CAPACITY, span, msg);
+                        return;
+                    }
+                    Some(s) => (s, base_applicability),
+                };
+                let label = format!("use with_capacity_and_hasher({to}, {})", h.default_expr());
+                span_lint_and_sugg(
+                    cx,
+                    CAPTRACK_PGO_CAPACITY,
+                    span,
+                    msg,
+                    label,
+                    sugg,
+                    applicability,
+                );
             } else {
                 // No hasher injection: capacity-only path (existing M3 behaviour).
                 let Some(cap_sugg) = build_suggestion(cx, fn_expr, method_name, args, to, None)
@@ -1019,20 +1269,44 @@ fn emit_with_suggestion<'tcx>(
                     return;
                 };
                 let label = format!("use with_capacity({to})");
-                (cap_sugg, base_applicability, label)
-            };
-
-            span_lint_and_sugg(
-                cx,
-                CAPTRACK_PGO_CAPACITY,
-                span,
-                msg,
-                help_label,
-                sugg,
-                applicability,
-            );
+                span_lint_and_sugg(
+                    cx,
+                    CAPTRACK_PGO_CAPACITY,
+                    span,
+                    msg,
+                    label,
+                    cap_sugg,
+                    base_applicability,
+                );
+            }
         }
     }
+}
+
+/// Build a new type-ascription snippet that extends the existing type with a
+/// hasher parameter.
+///
+/// For `HashMap<K, V>` returns `HashMap<K, V, ::fxhash::FxBuildHasher>`.
+///
+/// Strategy:
+/// 1. Take the source snippet of the HIR type node (the entire ascription text).
+/// 2. Find the last `>` and insert `, <hasher_type>` before it.
+///
+/// This approach works for any nested path form (qualified or unqualified).
+/// Returns `None` when the snippet is unavailable or doesn't end with `>`.
+fn build_ascription_with_hasher<'tcx>(
+    cx: &LateContext<'tcx>,
+    hir_ty: &rustc_hir::Ty<'tcx>,
+    h: HasherChoice,
+) -> Option<String> {
+    let snippet = snippet_opt(cx, hir_ty.span)?;
+    // The snippet must end with `>` to be a generic type like `HashMap<K, V>`.
+    // For bare `HashMap` (Wildcard) there is no `>`, but we guard against
+    // Wildcard before calling this function.
+    let pos = snippet.rfind('>')?;
+    let hasher_ty = h.hasher_type_path();
+    let new_snip = format!("{}, {}{}", &snippet[..pos], hasher_ty, &snippet[pos..]);
+    Some(new_snip)
 }
 
 /// Build the replacement source string for the call expression.
@@ -1503,5 +1777,226 @@ mod tests {
             !path.contains('>'),
             "static path must not contain generic args"
         );
+    }
+
+    // ── Phase N: hasher_arg_counts + AscriptionForm pure helpers ─────────────
+
+    /// HashMap requires (2, 3): 2 generics without hasher, 3 with.
+    #[test]
+    fn hasher_arg_counts_hashmap() {
+        assert_eq!(hasher_arg_counts(TrackedType::HashMap), Some((2, 3)));
+    }
+
+    /// HashSet requires (1, 2): 1 generic without hasher, 2 with.
+    #[test]
+    fn hasher_arg_counts_hashset() {
+        assert_eq!(hasher_arg_counts(TrackedType::HashSet), Some((1, 2)));
+    }
+
+    /// IndexMap requires (2, 3): same shape as HashMap.
+    #[test]
+    fn hasher_arg_counts_indexmap() {
+        assert_eq!(hasher_arg_counts(TrackedType::IndexMap), Some((2, 3)));
+    }
+
+    /// IndexSet requires (1, 2): same shape as HashSet.
+    #[test]
+    fn hasher_arg_counts_indexset() {
+        assert_eq!(hasher_arg_counts(TrackedType::IndexSet), Some((1, 2)));
+    }
+
+    /// DashMap requires (2, 3): K, V [, S].
+    #[test]
+    fn hasher_arg_counts_dashmap() {
+        assert_eq!(hasher_arg_counts(TrackedType::DashMap), Some((2, 3)));
+    }
+
+    /// scc::HashMap requires (2, 3).
+    #[test]
+    fn hasher_arg_counts_scc_hashmap() {
+        assert_eq!(hasher_arg_counts(TrackedType::SccHashMap), Some((2, 3)));
+    }
+
+    /// scc::HashSet requires (1, 2).
+    #[test]
+    fn hasher_arg_counts_scc_hashset() {
+        assert_eq!(hasher_arg_counts(TrackedType::SccHashSet), Some((1, 2)));
+    }
+
+    /// Vec is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_vec_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::Vec), None);
+    }
+
+    /// VecDeque is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_vecdeque_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::VecDeque), None);
+    }
+
+    /// BTreeMap is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_btreemap_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::BTreeMap), None);
+    }
+
+    /// BTreeSet is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_btreeset_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::BTreeSet), None);
+    }
+
+    /// BytesMut is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_bytesmut_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::BytesMut), None);
+    }
+
+    /// scc::TreeIndex is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_scc_treeindex_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::SccTreeIndex), None);
+    }
+
+    /// SmallVec is not a hashing type — returns None.
+    #[test]
+    fn hasher_arg_counts_smallvec_not_applicable() {
+        assert_eq!(hasher_arg_counts(TrackedType::SmallVec), None);
+    }
+
+    // ── HasherChoice::hasher_type_path ────────────────────────────────────────
+
+    /// Fx hasher_type_path gives the type (not constructor) form.
+    #[test]
+    fn hasher_type_path_fx() {
+        assert_eq!(
+            HasherChoice::Fx.hasher_type_path(),
+            "::fxhash::FxBuildHasher"
+        );
+    }
+
+    /// AHash hasher_type_path.
+    #[test]
+    fn hasher_type_path_ahash() {
+        assert_eq!(
+            HasherChoice::AHash.hasher_type_path(),
+            "::ahash::RandomState"
+        );
+    }
+
+    /// FoldHash hasher_type_path.
+    #[test]
+    fn hasher_type_path_foldhash() {
+        assert_eq!(
+            HasherChoice::FoldHash.hasher_type_path(),
+            "::foldhash::fast::RandomState"
+        );
+    }
+
+    // ── build_ascription_with_hasher pure logic (snippet-level) ──────────────
+    //
+    // `build_ascription_with_hasher` needs a real LateContext to call
+    // `snippet_opt`, so we can't unit-test it directly without HIR.  Instead
+    // we test the core string-manipulation logic it relies on: inserting
+    // `, HasherType` before the last `>`.
+
+    /// Simulated snippet insertion: `HashMap<K, V>` → `HashMap<K, V, ::fxhash::FxBuildHasher>`.
+    #[test]
+    fn ascription_snippet_insertion_hashmap_2_generics() {
+        let snippet = "HashMap<K, V>";
+        let hasher_ty = "::fxhash::FxBuildHasher";
+        let pos = snippet.rfind('>').unwrap();
+        let result = format!("{}, {}{}", &snippet[..pos], hasher_ty, &snippet[pos..]);
+        assert_eq!(result, "HashMap<K, V, ::fxhash::FxBuildHasher>");
+    }
+
+    /// Simulated snippet insertion: `HashSet<T>` → `HashSet<T, ::ahash::RandomState>`.
+    #[test]
+    fn ascription_snippet_insertion_hashset_1_generic() {
+        let snippet = "HashSet<T>";
+        let hasher_ty = "::ahash::RandomState";
+        let pos = snippet.rfind('>').unwrap();
+        let result = format!("{}, {}{}", &snippet[..pos], hasher_ty, &snippet[pos..]);
+        assert_eq!(result, "HashSet<T, ::ahash::RandomState>");
+    }
+
+    /// Nested generics: `HashMap<String, Vec<u8>>` →
+    /// `HashMap<String, Vec<u8>, ::fxhash::FxBuildHasher>`.
+    /// Uses `rfind('>')` so we insert before the last `>`, not an inner one.
+    #[test]
+    fn ascription_snippet_insertion_nested_generics() {
+        let snippet = "HashMap<String, Vec<u8>>";
+        let hasher_ty = "::fxhash::FxBuildHasher";
+        let pos = snippet.rfind('>').unwrap();
+        let result = format!("{}, {}{}", &snippet[..pos], hasher_ty, &snippet[pos..]);
+        assert_eq!(result, "HashMap<String, Vec<u8>, ::fxhash::FxBuildHasher>");
+    }
+
+    /// Fully-qualified path: `std::collections::HashMap<u32, String>` →
+    /// `std::collections::HashMap<u32, String, ::fxhash::FxBuildHasher>`.
+    #[test]
+    fn ascription_snippet_insertion_qualified_path() {
+        let snippet = "std::collections::HashMap<u32, String>";
+        let hasher_ty = "::fxhash::FxBuildHasher";
+        let pos = snippet.rfind('>').unwrap();
+        let result = format!("{}, {}{}", &snippet[..pos], hasher_ty, &snippet[pos..]);
+        assert_eq!(
+            result,
+            "std::collections::HashMap<u32, String, ::fxhash::FxBuildHasher>"
+        );
+    }
+
+    /// Bare `HashMap` (no generics) — `rfind('>')` returns `None`, no insertion.
+    /// This ensures `build_ascription_with_hasher` returns `None` for Wildcard.
+    #[test]
+    fn ascription_snippet_insertion_bare_type_no_angle_bracket() {
+        let snippet = "HashMap";
+        assert!(
+            snippet.rfind('>').is_none(),
+            "bare type has no '>' — build_ascription_with_hasher returns None"
+        );
+    }
+
+    // ── Coverage table for hasher_arg_counts (all 14 types) ──────────────────
+
+    /// Every non-hashing tracked type returns None.
+    #[test]
+    fn non_hashing_types_all_return_none() {
+        for t in [
+            TrackedType::Vec,
+            TrackedType::VecDeque,
+            TrackedType::BTreeMap,
+            TrackedType::BTreeSet,
+            TrackedType::BytesMut,
+            TrackedType::SccTreeIndex,
+            TrackedType::SmallVec,
+        ] {
+            assert_eq!(
+                hasher_arg_counts(t),
+                None,
+                "{t:?} should not have hasher arg counts"
+            );
+        }
+    }
+
+    /// Every hashing tracked type returns Some with consistent without/with values.
+    #[test]
+    fn hashing_types_all_return_some() {
+        for (t, expected) in [
+            (TrackedType::HashMap, (2, 3)),
+            (TrackedType::HashSet, (1, 2)),
+            (TrackedType::IndexMap, (2, 3)),
+            (TrackedType::IndexSet, (1, 2)),
+            (TrackedType::DashMap, (2, 3)),
+            (TrackedType::SccHashMap, (2, 3)),
+            (TrackedType::SccHashSet, (1, 2)),
+        ] {
+            assert_eq!(
+                hasher_arg_counts(t),
+                Some(expected),
+                "{t:?} should have hasher arg counts {expected:?}"
+            );
+        }
     }
 }

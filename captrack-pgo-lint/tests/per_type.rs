@@ -494,6 +494,20 @@ fn per_type_scc_hashset_hasher_fx() {
     );
 }
 
+// ── Phase N: type-ascribed hasher multi-span tests ───────────────────────────
+
+/// HashMap with explicit type ascription `HashMap<u32, u32>` (hasher omitted)
+/// → Phase N multi-span suggestion: extend ascription + rewrite ctor.
+#[test]
+fn per_type_hashmap_ascribed_hasher_fx() {
+    run_std_type_test(
+        "per_type_hashmap_ascribed_hasher_fx",
+        "hashmap_ascribed_hasher",
+        "HashMap::<u32, u32>::with_capacity(0)",
+        Some("fx"),
+    );
+}
+
 // ── Verification: non-hashing types do NOT get hasher injected ────────────────
 
 /// Verify that Vec with CAPTRACK_PGO_HASHER=fx still gets capacity-ONLY rewrite

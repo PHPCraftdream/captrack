@@ -12,10 +12,10 @@ warning: captrack-pgo: profile shows peak=100 elements, p95=80, count=50 — pre
 LL |     let _m2: HashMap<u8, u8> = HashMap::with_capacity(4);
    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-help: use with_capacity(128) (skipping hasher swap — explicit type ascription would prevent inference)
+help: use with_capacity_and_hasher + extend type ascription with hasher (Phase N)
    |
 LL -     let _m2: HashMap<u8, u8> = HashMap::with_capacity(4);
-LL +     let _m2: HashMap<u8, u8> = HashMap::with_capacity(128);
+LL +     let _m2: HashMap<u8, u8, ::fxhash::FxBuildHasher> = HashMap::with_capacity_and_hasher(128, ::fxhash::FxBuildHasher::default());
    |
 
 warning: captrack-pgo: profile shows peak=100 elements, p95=60, count=50 — pre-allocate to 64
