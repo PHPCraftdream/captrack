@@ -505,3 +505,332 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn _silence_unused_value_import() {
     let _ = value(true);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROOT_MANIFEST: &str = r#"[workspace]
+members = ["crates/a", "crates/b"]
+resolver = "2"
+"#;
+
+    const ROOT_MANIFEST_WITH_DEPS: &str = r#"[workspace]
+members = ["crates/a", "crates/b"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = "1"
+"#;
+
+    const ROOT_MANIFEST_NO_MEMBERS: &str = r#"[workspace]
+resolver = "2"
+"#;
+
+    const ROOT_MANIFEST_WITH_EXCLUDE: &str = r#"[workspace]
+members = ["crates/*"]
+exclude = ["crates/b"]
+resolver = "2"
+"#;
+
+    const MEMBER_MANIFEST: &str = r#"[package]
+name = "a"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
+"#;
+
+    const MEMBER_MANIFEST_NO_DEPS: &str = r#"[package]
+name = "a"
+version = "0.1.0"
+"#;
+
+    /// Build a temp workspace with a root Cargo.toml and N member crates,
+    /// each with their own Cargo.toml. Returns the tempdir (kept alive by
+    /// the caller) and the workspace root path.
+    fn make_workspace(root_manifest: &str, members: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Cargo.toml"), root_manifest).unwrap();
+        for (rel, content) in members {
+            let member_dir = dir.path().join(rel);
+            std::fs::create_dir_all(&member_dir).unwrap();
+            std::fs::write(member_dir.join("Cargo.toml"), content).unwrap();
+        }
+        dir
+    }
+
+    // ── resolve_workspace_members ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_workspace_members_plain_list() {
+        let dir = make_workspace(
+            ROOT_MANIFEST,
+            &[
+                ("crates/a", MEMBER_MANIFEST),
+                ("crates/b", MEMBER_MANIFEST),
+            ],
+        );
+        let members = resolve_workspace_members(dir.path()).unwrap();
+        assert_eq!(members.len(), 2);
+        let names: BTreeSet<String> = members
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains("a"));
+        assert!(names.contains("b"));
+    }
+
+    #[test]
+    fn resolve_workspace_members_glob_and_exclude() {
+        let dir = make_workspace(
+            ROOT_MANIFEST_WITH_EXCLUDE,
+            &[
+                ("crates/a", MEMBER_MANIFEST),
+                ("crates/b", MEMBER_MANIFEST),
+            ],
+        );
+        let members = resolve_workspace_members(dir.path()).unwrap();
+        // "crates/b" is excluded even though it matches the glob.
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].file_name().unwrap(), "a");
+    }
+
+    #[test]
+    fn resolve_workspace_members_no_members_field_errors() {
+        let dir = make_workspace(ROOT_MANIFEST_NO_MEMBERS, &[]);
+        let result = resolve_workspace_members(dir.path());
+        assert!(result.is_err(), "missing members field must error");
+    }
+
+    #[test]
+    fn resolve_workspace_members_missing_root_manifest_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_workspace_members(dir.path());
+        assert!(result.is_err());
+    }
+
+    // ── patch_root_manifest ─────────────────────────────────────────────────
+
+    #[test]
+    fn patch_root_manifest_adds_dependencies_table() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let root = dir.path().join("Cargo.toml");
+        let source = WireSource::Version {
+            version: "0.1".to_string(),
+        };
+        let entry = patch_root_manifest(&root, &source).unwrap();
+        assert!(entry.is_some(), "first run must patch the file");
+
+        let after = std::fs::read_to_string(&root).unwrap();
+        assert!(after.contains("[workspace.dependencies]"));
+        assert!(after.contains("captrack"));
+        assert!(after.contains("telemetry"));
+    }
+
+    #[test]
+    fn patch_root_manifest_preserves_existing_deps_table() {
+        let dir = make_workspace(ROOT_MANIFEST_WITH_DEPS, &[]);
+        let root = dir.path().join("Cargo.toml");
+        let source = WireSource::Version {
+            version: "0.1".to_string(),
+        };
+        patch_root_manifest(&root, &source).unwrap();
+
+        let after = std::fs::read_to_string(&root).unwrap();
+        assert!(after.contains("serde"), "existing dep must survive");
+        assert!(after.contains("captrack"));
+    }
+
+    #[test]
+    fn patch_root_manifest_is_idempotent() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let root = dir.path().join("Cargo.toml");
+        let source = WireSource::Version {
+            version: "0.1".to_string(),
+        };
+        let first = patch_root_manifest(&root, &source).unwrap();
+        assert!(first.is_some());
+
+        let second = patch_root_manifest(&root, &source).unwrap();
+        assert!(second.is_none(), "second run must be a no-op");
+    }
+
+    #[test]
+    fn patch_root_manifest_with_path_source() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let root = dir.path().join("Cargo.toml");
+        let source = WireSource::Path {
+            path: PathBuf::from("/abs/path/to/captrack"),
+        };
+        patch_root_manifest(&root, &source).unwrap();
+        let after = std::fs::read_to_string(&root).unwrap();
+        assert!(after.contains("path"));
+        assert!(after.contains("/abs/path/to/captrack".replace('\\', "/").as_str()) || after.contains("captrack"));
+    }
+
+    // ── patch_member_manifest ────────────────────────────────────────────────
+
+    #[test]
+    fn patch_member_manifest_adds_workspace_true_dep() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let member = dir.path().join("member.toml");
+        std::fs::write(&member, MEMBER_MANIFEST).unwrap();
+
+        let entry = patch_member_manifest(&member).unwrap();
+        assert!(entry.is_some());
+
+        let after = std::fs::read_to_string(&member).unwrap();
+        assert!(after.contains("captrack"));
+        assert!(after.contains("workspace = true") || after.contains("workspace=true"));
+        assert!(after.contains("anyhow"), "existing dep must survive");
+    }
+
+    #[test]
+    fn patch_member_manifest_creates_dependencies_table_if_missing() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let member = dir.path().join("member.toml");
+        std::fs::write(&member, MEMBER_MANIFEST_NO_DEPS).unwrap();
+
+        let entry = patch_member_manifest(&member).unwrap();
+        assert!(entry.is_some());
+        let after = std::fs::read_to_string(&member).unwrap();
+        assert!(after.contains("[dependencies]"));
+        assert!(after.contains("captrack"));
+    }
+
+    #[test]
+    fn patch_member_manifest_is_idempotent() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let member = dir.path().join("member.toml");
+        std::fs::write(&member, MEMBER_MANIFEST).unwrap();
+
+        let first = patch_member_manifest(&member).unwrap();
+        assert!(first.is_some());
+        let second = patch_member_manifest(&member).unwrap();
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn patch_member_manifest_sha_changes_after_patch() {
+        let dir = make_workspace(ROOT_MANIFEST, &[]);
+        let member = dir.path().join("member.toml");
+        std::fs::write(&member, MEMBER_MANIFEST).unwrap();
+
+        let entry = patch_member_manifest(&member).unwrap().unwrap();
+        assert_ne!(entry.sha256_before, entry.sha256_after);
+        assert_eq!(
+            entry.sha256_before,
+            sha256_hex(MEMBER_MANIFEST.as_bytes())
+        );
+        let after = std::fs::read_to_string(&member).unwrap();
+        assert_eq!(entry.sha256_after, sha256_hex(after.as_bytes()));
+    }
+
+    // ── unwire (via run_wire / run_unwire) ──────────────────────────────────
+
+    #[test]
+    fn wire_then_unwire_restores_original_content() {
+        let dir = make_workspace(
+            ROOT_MANIFEST,
+            &[
+                ("crates/a", MEMBER_MANIFEST),
+                ("crates/b", MEMBER_MANIFEST),
+            ],
+        );
+        let workspace_root = dir.path().to_path_buf();
+
+        run_wire(WireArgs {
+            workspace_root: workspace_root.clone(),
+            captrack_path: None,
+        })
+        .unwrap();
+
+        let root_after_wire = std::fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
+        assert!(root_after_wire.contains("captrack"));
+
+        run_unwire(UnwireArgs {
+            workspace_root: workspace_root.clone(),
+            manifest: None,
+        })
+        .unwrap();
+
+        let root_after_unwire =
+            std::fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
+        assert_eq!(root_after_unwire, ROOT_MANIFEST);
+
+        let a_after_unwire =
+            std::fs::read_to_string(workspace_root.join("crates/a/Cargo.toml")).unwrap();
+        assert_eq!(a_after_unwire, MEMBER_MANIFEST);
+
+        // Manifest file must be removed after a successful unwire.
+        assert!(!default_wire_manifest_path(&workspace_root).is_file());
+    }
+
+    #[test]
+    fn unwire_refuses_when_manifest_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run_unwire(UnwireArgs {
+            workspace_root: dir.path().to_path_buf(),
+            manifest: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unwire_refuses_when_file_modified_after_wire() {
+        let dir = make_workspace(ROOT_MANIFEST, &[("crates/a", MEMBER_MANIFEST)]);
+        let workspace_root = dir.path().to_path_buf();
+
+        run_wire(WireArgs {
+            workspace_root: workspace_root.clone(),
+            captrack_path: None,
+        })
+        .unwrap();
+
+        // Tamper with the root manifest after wiring — unwire must detect
+        // the sha256 mismatch and refuse to revert.
+        let root_path = workspace_root.join("Cargo.toml");
+        let mut tampered = std::fs::read_to_string(&root_path).unwrap();
+        tampered.push_str("\n# manual edit\n");
+        std::fs::write(&root_path, &tampered).unwrap();
+
+        let result = run_unwire(UnwireArgs {
+            workspace_root: workspace_root.clone(),
+            manifest: None,
+        });
+        assert!(result.is_err(), "unwire must refuse on sha mismatch");
+
+        // The tampered file must be left untouched.
+        let still_tampered = std::fs::read_to_string(&root_path).unwrap();
+        assert_eq!(still_tampered, tampered);
+    }
+
+    #[test]
+    fn wire_is_idempotent_second_run_touches_nothing() {
+        let dir = make_workspace(ROOT_MANIFEST, &[("crates/a", MEMBER_MANIFEST)]);
+        let workspace_root = dir.path().to_path_buf();
+
+        run_wire(WireArgs {
+            workspace_root: workspace_root.clone(),
+            captrack_path: None,
+        })
+        .unwrap();
+        let root_after_first = std::fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
+
+        // Second wire run should find everything already wired.
+        run_wire(WireArgs {
+            workspace_root: workspace_root.clone(),
+            captrack_path: None,
+        })
+        .unwrap();
+        let root_after_second =
+            std::fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
+
+        assert_eq!(root_after_first, root_after_second);
+    }
+}

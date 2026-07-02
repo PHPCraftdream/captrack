@@ -130,3 +130,171 @@ fn captrack_autodump_spawn_ticker() {
         // normal exit.
         .ok();
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate process-wide environment variables —
+    // `cargo test` runs tests in the same binary concurrently by default, and
+    // std::env mutation is process-global.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── autodump_interval_ms ─────────────────────────────────────────────────
+
+    #[test]
+    fn interval_defaults_to_500ms_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_AUTODUMP_INTERVAL_MS");
+        std::env::remove_var("CAPTRACK_AUTODUMP_INTERVAL_MS");
+
+        assert_eq!(autodump_interval_ms(), 500);
+
+        if let Some(v) = prev {
+            std::env::set_var("CAPTRACK_AUTODUMP_INTERVAL_MS", v);
+        }
+    }
+
+    #[test]
+    fn interval_respects_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_AUTODUMP_INTERVAL_MS");
+        std::env::set_var("CAPTRACK_AUTODUMP_INTERVAL_MS", "123");
+
+        assert_eq!(autodump_interval_ms(), 123);
+
+        match prev {
+            Some(v) => std::env::set_var("CAPTRACK_AUTODUMP_INTERVAL_MS", v),
+            None => std::env::remove_var("CAPTRACK_AUTODUMP_INTERVAL_MS"),
+        }
+    }
+
+    #[test]
+    fn interval_falls_back_to_default_on_unparseable_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_AUTODUMP_INTERVAL_MS");
+        std::env::set_var("CAPTRACK_AUTODUMP_INTERVAL_MS", "not-a-number");
+
+        assert_eq!(autodump_interval_ms(), 500);
+
+        match prev {
+            Some(v) => std::env::set_var("CAPTRACK_AUTODUMP_INTERVAL_MS", v),
+            None => std::env::remove_var("CAPTRACK_AUTODUMP_INTERVAL_MS"),
+        }
+    }
+
+    // ── autodump_enabled ─────────────────────────────────────────────────────
+
+    #[test]
+    fn enabled_by_default_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_AUTODUMP");
+        std::env::remove_var("CAPTRACK_AUTODUMP");
+
+        assert!(autodump_enabled());
+
+        if let Some(v) = prev {
+            std::env::set_var("CAPTRACK_AUTODUMP", v);
+        }
+    }
+
+    #[test]
+    fn disabled_by_recognized_falsy_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_AUTODUMP");
+
+        for falsy in ["0", "off", "false", "no", "OFF", "False"] {
+            std::env::set_var("CAPTRACK_AUTODUMP", falsy);
+            assert!(!autodump_enabled(), "expected {falsy} to disable autodump");
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("CAPTRACK_AUTODUMP", v),
+            None => std::env::remove_var("CAPTRACK_AUTODUMP"),
+        }
+    }
+
+    // ── default_dump_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn dump_path_respects_captrack_dump_dir_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CAPTRACK_DUMP_DIR");
+        std::env::set_var("CAPTRACK_DUMP_DIR", "some/custom/dir");
+
+        let path = default_dump_path();
+        assert!(path.starts_with("some/custom/dir"));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("profile-"));
+
+        match prev {
+            Some(v) => std::env::set_var("CAPTRACK_DUMP_DIR", v),
+            None => std::env::remove_var("CAPTRACK_DUMP_DIR"),
+        }
+    }
+
+    // ── end-to-end: dump format + atomic write (via dump::dump_capacity_stats,
+    //    the same function the periodic ticker and the atexit dtor call) ─────
+
+    #[test]
+    fn dump_output_is_atomic_and_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-test.json");
+
+        crate::dump::dump_capacity_stats(&path).unwrap();
+
+        assert!(path.is_file(), "dump file must exist after a successful write");
+
+        let tmp_path = {
+            let mut name = path.file_name().unwrap().to_os_string();
+            name.push(".tmp");
+            path.with_file_name(name)
+        };
+        assert!(!tmp_path.exists(), "no .tmp file must remain after a successful write");
+    }
+
+    #[test]
+    fn dump_output_contains_total_observed_field() {
+        use crate::tvec;
+
+        // Force at least one registry entry so the dump has content.
+        let v: crate::TrackedVec<i32> = tvec!("autodump-test-total-observed", 4);
+        drop(v);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-total-observed.json");
+        crate::dump::dump_capacity_stats(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("total_observed"),
+            "dump JSON must include total_observed; got: {text}"
+        );
+    }
+
+    #[test]
+    fn dump_does_not_fail_on_empty_registry() {
+        // A path under a fresh tempdir guarantees no other test has written
+        // to the same file; the registry itself may or may not be empty
+        // depending on test execution order, but the call must succeed and
+        // produce valid JSON regardless.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-empty.json");
+
+        let result = crate::dump::dump_capacity_stats(&path);
+        assert!(result.is_ok());
+        assert!(path.is_file());
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed.get("stats").is_some());
+    }
+}
