@@ -35,12 +35,21 @@
 //! `cargo metadata --format-version 1 --no-deps --manifest-path <workspace>/Cargo.toml`
 //! and parsing the resulting JSON.  No additional crate dependency is required.
 //!
+//! ## Staleness guard
+//!
+//! `instrument` (called as step 2 above) writes a source-hash snapshot to
+//! `target/captrack-pgo/last-instrument-hashes.json` (see `crate::staleness`).
+//! `apply` — which `measure` does NOT call; it is a separate, later, manual
+//! step run by the user against `merged.json` — consults that snapshot and
+//! refuses to proceed if any tracked file changed since `instrument` ran,
+//! unless `--force` is passed.  `measure` itself doesn't need to invoke the
+//! guard: its own instrument step is what produces the snapshot in the first
+//! place, and `measure` never calls `apply` internally.
+//!
 //! ## TODO / followups
 //!
 //! - **Real integration test**: a true end-to-end test requires cargo + nightly
 //!   + the dylint plugin — skipped here, marked `#[ignore]`.
-//! - **Staleness-guard**: record file hashes after `instrument` and refuse
-//!   `apply` if sources changed before apply.  Useful but separate scope.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

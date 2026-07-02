@@ -12,6 +12,7 @@ mod measure;
 mod merge;
 mod model;
 mod profile;
+mod staleness;
 mod wire;
 mod workspace;
 

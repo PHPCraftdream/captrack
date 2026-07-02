@@ -27,6 +27,7 @@ use crate::lint_apply::{
     diff_snapshots, resolve_default_lint_path, snapshot_rs_files, write_manifest, LintRunManifest,
     Operation,
 };
+use crate::staleness;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public arguments struct
@@ -334,6 +335,15 @@ pub fn run_lint_instrument(args: LintInstrumentArgs) -> Result<()> {
     let manifest_path = default_instrument_manifest_path(&args.workspace_root);
     write_manifest(&manifest, &manifest_path)?;
 
+    // ── 5b. Write staleness snapshot ─────────────────────────────────────────
+    //
+    // Records the SHA-256 of every `.rs` file as it stands right now (post
+    // `--fix`), so a later `apply` run can detect whether the workspace was
+    // edited in between and the profile's (file, line, column) sites might no
+    // longer be trustworthy.
+    let staleness_path = staleness::write_staleness_snapshot(&args.workspace_root)
+        .context("write staleness snapshot")?;
+
     // ── 6. Report ─────────────────────────────────────────────────────────────
 
     let n = changed_files.len();
@@ -353,6 +363,7 @@ pub fn run_lint_instrument(args: LintInstrumentArgs) -> Result<()> {
         "  revert with: captrack-pgo undo --manifest {}",
         manifest_path.display()
     );
+    println!("  staleness snapshot: {}", staleness_path.display());
 
     Ok(())
 }

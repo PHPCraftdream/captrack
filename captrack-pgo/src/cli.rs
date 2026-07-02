@@ -89,6 +89,17 @@ pub enum Command {
     /// Requires: `cargo install cargo-dylint dylint-link` and a nightly toolchain
     /// pinned in `captrack-pgo-lint/rust-toolchain.toml`.
     ///
+    /// ## Staleness guard
+    ///
+    /// If `target/captrack-pgo/last-instrument-hashes.json` exists (written by
+    /// a prior `instrument` run), every recorded file's current SHA-256 is
+    /// checked against the snapshot.  A mismatch (or a deleted file) aborts
+    /// `apply` before it touches anything, since the profile's `(file, line,
+    /// column)` sites may no longer point at the intended code.  Pass
+    /// `--force` to skip this check.  If the hashes file does not exist at
+    /// all, the check is silently skipped (e.g. when `apply` is run against a
+    /// profile that was never produced via this binary's `instrument` step).
+    ///
     /// When `--hasher` is set to anything other than `none`, every matched
     /// `HashMap`/`HashSet` constructor is also upgraded to `with_capacity_and_hasher`.
     /// Note: sites with an explicit local type ascription (`let m: HashMap<K,V> = ...`)
@@ -155,6 +166,15 @@ pub enum Command {
         /// exact — no rounding; use the exact computed value (truncated to usize).
         #[arg(long, default_value = "pow2", value_parser = parse_cap_round)]
         cap_round: CapRoundChoice,
+
+        /// Bypass the staleness guard that refuses to apply when source
+        /// files changed since the last `instrument` run recorded a hash
+        /// snapshot (`target/captrack-pgo/last-instrument-hashes.json`).
+        ///
+        /// Use when you know the changes don't affect the profiled sites, or
+        /// when you intentionally want to apply against an older snapshot.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Auto-instrument every bare std collection constructor with
@@ -417,6 +437,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             cap_from,
             cap_mul,
             cap_round,
+            force,
         } => {
             // Pre-flight: cap_mul must be positive and finite.
             if cap_mul <= 0.0 || !cap_mul.is_finite() {
@@ -427,7 +448,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             run_apply(
                 profile, lint_path, workspace, dry_run, allow_dirty, hasher,
-                cap_from, cap_mul, cap_round,
+                cap_from, cap_mul, cap_round, force,
             )?;
         }
         Command::Instrument {
@@ -553,6 +574,7 @@ fn run_apply(
     cap_from: CapFromChoice,
     cap_mul: f64,
     cap_round: CapRoundChoice,
+    force: bool,
 ) -> anyhow::Result<()> {
     use crate::workspace as ws;
 
@@ -581,6 +603,7 @@ fn run_apply(
         cap_from,
         cap_mul,
         cap_round,
+        force,
     })
 }
 

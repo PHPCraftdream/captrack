@@ -557,6 +557,192 @@ fn invalid_cap_round_is_rejected_by_clap() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Staleness-guard structural tests — run unconditionally (dry-run only)
+//
+// `apply --dry-run` runs the same pre-flight sequence as a real `apply`
+// (including the staleness check) before printing its "would run" notice and
+// returning early, so these tests exercise the guard through the CLI without
+// requiring nightly or cargo-dylint.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Positive path: no staleness manifest exists at all (no prior `instrument`
+/// run) → the guard is a no-op and `--dry-run` succeeds normally.
+#[test]
+fn apply_dry_run_succeeds_when_no_staleness_manifest() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, _lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected exit 0 with no staleness manifest; stderr: {stderr}\nstdout: {stdout}"
+    );
+}
+
+/// Positive path: a staleness manifest exists and every recorded file still
+/// matches its recorded hash → `apply` proceeds (does not bail on staleness).
+#[test]
+fn apply_dry_run_succeeds_when_files_unchanged_since_instrument() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    write_fake_staleness_manifest(root, &[&lib_rs]);
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected exit 0 when files unchanged since instrument; stderr: {stderr}\nstdout: {stdout}"
+    );
+}
+
+/// Negative path: a staleness manifest exists but the tracked file was
+/// modified afterwards → `apply` bails before reaching the dry-run notice,
+/// with an error naming the changed file and hinting at `--force`.
+#[test]
+fn apply_bails_when_file_changed_since_instrument() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    write_fake_staleness_manifest(root, &[&lib_rs]);
+
+    // Modify the tracked file AFTER the staleness snapshot was recorded.
+    std::fs::write(&lib_rs, "pub fn f() { let _v = Vec::new(); } // changed\n").unwrap();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when a tracked file changed since instrument"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stderr}{stdout}");
+    assert!(
+        combined.contains("lib.rs"),
+        "expected the changed file name in the error; got:\n{combined}"
+    );
+    assert!(
+        combined.contains("--force"),
+        "expected a --force hint in the error; got:\n{combined}"
+    );
+    // Must not have reached the dry-run notice.
+    assert!(
+        !stdout.contains("dry-run — would run"),
+        "guard must bail before the dry-run notice; got:\n{stdout}"
+    );
+}
+
+/// `--force` path: same modified-file scenario as above, but with `--force`
+/// passed → the staleness check is bypassed and `apply` proceeds normally.
+#[test]
+fn apply_force_bypasses_staleness_check() {
+    let src = "pub fn f() { let _v = Vec::new(); }\n";
+    let (tmp, lib_rs, profile_path) = make_workspace(src);
+    let root = tmp.path();
+
+    write_fake_staleness_manifest(root, &[&lib_rs]);
+    std::fs::write(&lib_rs, "pub fn f() { let _v = Vec::new(); } // changed\n").unwrap();
+
+    let lint_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("captrack-pgo-lint");
+
+    let out = Command::new(bin())
+        .args(["apply", "--dry-run", "--force", "--profile"])
+        .arg(&profile_path)
+        .arg("--lint-path")
+        .arg(&lint_path)
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("spawn captrack-pgo");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected exit 0 with --force despite changed file; stderr: {stderr}\nstdout: {stdout}"
+    );
+}
+
+/// Write a fake `last-instrument-hashes.json` staleness manifest recording
+/// the CURRENT sha256 of each given file, mirroring the format written by
+/// `captrack_pgo::staleness::write_staleness_snapshot`.
+fn write_fake_staleness_manifest(workspace_root: &Path, files: &[&Path]) {
+    use sha2::{Digest, Sha256};
+
+    let dir = workspace_root.join("target").join("captrack-pgo");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| {
+            let content = std::fs::read_to_string(f).unwrap();
+            let digest = Sha256::digest(content.as_bytes());
+            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            serde_json::json!({
+                "path": f.canonicalize().unwrap_or_else(|_| f.to_path_buf()),
+                "sha256": hex,
+            })
+        })
+        .collect();
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "timestamp": 0,
+        "files": entries,
+    });
+
+    std::fs::write(
+        dir.join("last-instrument-hashes.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Live tests — require nightly + cargo-dylint; #[ignore] by default.
 //
 // Run with: cargo test --test lint_apply -- --ignored

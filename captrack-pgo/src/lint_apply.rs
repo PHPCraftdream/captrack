@@ -425,6 +425,9 @@ pub struct LintApplyArgs {
     /// Forwarded to the plugin as `CAPTRACK_PGO_CAP_ROUND`.
     /// Default-variant (`Pow2`) → env var omitted (plugin default matches).
     pub cap_round: CapRoundChoice,
+    /// Bypass the staleness guard (see `crate::staleness`) even if source
+    /// files changed since the last `instrument` run.
+    pub force: bool,
 }
 
 /// Run the `apply` subcommand.
@@ -467,6 +470,13 @@ pub fn run_lint_apply(args: LintApplyArgs) -> Result<()> {
             args.workspace_root.display()
         ));
     }
+
+    // Staleness guard: refuse to apply against a profile whose (file, line,
+    // column) sites may no longer be trustworthy because sources changed
+    // since `instrument` last ran.  No-op when no staleness snapshot exists,
+    // or when `--force` is set.
+    crate::staleness::check_staleness(&args.workspace_root, args.force)
+        .context("staleness check")?;
 
     // ── 2. Snapshot before ───────────────────────────────────────────────────
 
