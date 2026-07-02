@@ -2,8 +2,13 @@
 //!
 //! # Overview
 //!
-//! This crate provides 13 `macro_rules!` macros (`tvec!`, `tmap!`, …) that
-//! wrap every major collection constructor.  In off-feature mode (default)
+//! This crate provides 17 `macro_rules!` macros (`tvec!`, `tvecdeque!`,
+//! `tbtreemap!`, `tbtreeset!`, `tbytesmut!`, `tfxmap!`, `tfxset!`, `tmap!`,
+//! `tset!`, `tdashmap!`, `tsccmap!`, `tsccset!`, `tscctree!`, `tsmallvec!`,
+//! `tstring!`, `thashbrownmap!`, `tbinaryheap!`) that wrap every major
+//! collection constructor.  A separate family of 10 `t*_owned!` sibling
+//! macros (see below) returns bare collection types with initial-capacity-only
+//! tracking.  In off-feature mode (default)
 //! each macro expands to the bare constructor with **zero overhead** — the
 //! compiler sees exactly `Vec::with_capacity(n)` etc.  When the `telemetry`
 //! feature is enabled, each macro instead returns a `Tracked*` wrapper that
@@ -69,6 +74,18 @@
 //! captrack macros themselves carry `#[allow(clippy::disallowed_methods)]`
 //! in their expansions so they are always safe to use regardless of your
 //! clippy policy.
+//!
+//! # `t*_owned!` — initial-capacity-only siblings
+//!
+//! Ten of the macros above (`tvec!`, `tvecdeque!`, `tbytesmut!`, `tfxmap!`,
+//! `tfxset!`, `tmap!`, `tset!`, `tdashmap!`, `tsccmap!`, `tsccset!`) have a
+//! `_owned` sibling (`tvec_owned!`, `tvecdeque_owned!`, …) that **always**
+//! returns the bare std/third-party type — no `Tracked*` wrapper, no
+//! `.into_inner()` needed — and records only the *initial* requested
+//! capacity as a single sample, instead of tracking the Drop-time peak.
+//! Use these at call-sites where the capacity you pass in already is the
+//! final size you care about. `BTreeMap`/`BTreeSet`/`scc::TreeIndex` have no
+//! `_owned` variant since they have no `with_capacity` constructor.
 //!
 //! # Feature flags
 //!

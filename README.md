@@ -236,6 +236,24 @@ disallowed-methods = [
 | `thashbrownmap!` | `hashbrown::HashMap<K,V,S>`          | `;`-arm supported; capacity-based          |
 | `tsmallvec!`     | `smallvec::SmallVec<A>`              | requires `smallvec` crate; capacity-based  |
 
+## `t*_owned!` — initial-capacity-only siblings
+
+Ten of the macros above have an `_owned` sibling: `tvec_owned!`,
+`tvecdeque_owned!`, `tbytesmut_owned!`, `tfxmap_owned!`, `tfxset_owned!`,
+`tmap_owned!`, `tset_owned!`, `tdashmap_owned!`, `tsccmap_owned!`,
+`tsccset_owned!`. Unlike their `t*!` counterparts, these:
+
+- always return the **bare** collection type (`Vec<T>`, `HashMap<K,V,S>`,
+  …) in both feature modes — no `Tracked*` wrapper, no `.into_inner()` call;
+- record only the **initial** requested capacity as a single sample,
+  instead of tracking the Drop-time peak.
+
+Use them at call-sites where the capacity you pass in already is the final
+size (e.g. `tvec_owned!("name", input.len())`) and you want a plain
+collection at the function boundary. `tbtreemap!`, `tbtreeset!`, and
+`tscctree!` have no `_owned` variant — those types have no `with_capacity`
+constructor, so an initial-capacity sample would always be `0`.
+
 ## Tracked types (telemetry mode)
 
 When `telemetry` is enabled the macros return `Tracked*` wrappers:

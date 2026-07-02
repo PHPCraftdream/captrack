@@ -56,6 +56,8 @@ The **17 macros** in `src/lib.rs` split into two implementation strategies (was 
 
 Off-feature: `TrackedX` names are type aliases to the bare std/third-party types defined in `src/aliases.rs`. Optional types are gated on the corresponding mirror feature flag (`bytes`, `indexmap`, `dashmap`, `scc`). Enabling `telemetry` activates all mirror features automatically.
 
+**`t*_owned!` siblings** (`tvec_owned!`, `tvecdeque_owned!`, `tbytesmut_owned!`, `tfxmap_owned!`, `tfxset_owned!`, `tmap_owned!`, `tset_owned!`, `tdashmap_owned!`, `tsccmap_owned!`, `tsccset_owned!` — 10 total, `src/lib.rs`) are a separate initial-cap-only family: they always return the bare collection type (never `Tracked*`) and record just the requested initial capacity as a single sample, skipping Drop-time peak tracking. No `_owned` variant exists for `tbtreemap!`/`tbtreeset!`/`tscctree!` since those types lack a `with_capacity` constructor.
+
 ### Axis 2 — hasher choice (three levels, all wired through `CapHasher`)
 
 - **2A — global default:** `src/hasher.rs` is a wall of `#[cfg]` `compile_error!`s (mutual exclusion guard) plus five `pub type CapHasher = ...` aliases. Adding a hasher means: new optional dep in `Cargo.toml`, new feature flag, new `compile_error!` pairs against every existing hasher, new type alias.
